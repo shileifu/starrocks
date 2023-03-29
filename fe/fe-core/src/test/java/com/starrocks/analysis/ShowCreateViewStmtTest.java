@@ -15,7 +15,7 @@
 
 package com.starrocks.analysis;
 
-import com.clearspring.analytics.util.Lists;
+import com.google.common.collect.Lists;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
@@ -27,10 +27,8 @@ import com.starrocks.sql.analyzer.Analyzer;
 import com.starrocks.sql.ast.CreateViewStmt;
 import com.starrocks.sql.ast.DescribeStmt;
 import com.starrocks.sql.ast.DropTableStmt;
-import com.starrocks.sql.ast.ShowResourceGroupStmt;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.statistic.StatsConstants;
-import com.starrocks.system.BackendCoreStat;
 import com.starrocks.utframe.StarRocksAssert;
 import com.starrocks.utframe.UtFrameUtils;
 import org.junit.AfterClass;

@@ -39,6 +39,7 @@ class MemTracker;
 class RowsetReadOptions;
 class SnapshotMeta;
 class Tablet;
+class TabletBasicInfo;
 class TTabletInfo;
 
 class ChunkIterator;
@@ -47,7 +48,6 @@ class Schema;
 class TabletReader;
 class ChunkChanger;
 class SegmentIterator;
-class ChunkAllocator;
 
 struct CompactionInfo {
     EditVersion start_version;
@@ -61,6 +61,9 @@ public:
     using ColumnUniquePtr = std::unique_ptr<Column>;
     using segment_rowid_t = uint32_t;
     using DeletesMap = std::unordered_map<uint32_t, vector<segment_rowid_t>>;
+
+    TabletUpdates(const TabletUpdates&) = delete;
+    const TabletUpdates& operator=(const TabletUpdates&) = delete;
 
     explicit TabletUpdates(Tablet& tablet);
     ~TabletUpdates();
@@ -96,7 +99,7 @@ public:
 
     Status get_rowsets_total_stats(const std::vector<uint32_t>& rowsets, size_t* total_rows, size_t* total_dels);
 
-    Status rowset_commit(int64_t version, const RowsetSharedPtr& rowset);
+    Status rowset_commit(int64_t version, const RowsetSharedPtr& rowset, uint32_t wait_time);
 
     Status save_meta();
 
@@ -177,7 +180,8 @@ public:
     Status convert_from(const std::shared_ptr<Tablet>& base_tablet, int64_t request_version,
                         ChunkChanger* chunk_changer);
 
-    Status reorder_from(const std::shared_ptr<Tablet>& base_tablet, int64_t request_version);
+    Status reorder_from(const std::shared_ptr<Tablet>& base_tablet, int64_t request_version,
+                        ChunkChanger* chunk_changer);
 
     Status load_snapshot(const SnapshotMeta& snapshot_meta, bool restore_from_backup = false);
 
@@ -234,15 +238,10 @@ public:
     //          column 2 value@rssid:6 rowid:4,
     //   ]
     // ]
-    Status get_column_values(std::vector<uint32_t>& column_ids, bool with_default,
+    Status get_column_values(const std::vector<uint32_t>& column_ids, bool with_default,
                              std::map<uint32_t, std::vector<uint32_t>>& rowids_by_rssid,
-                             vector<std::unique_ptr<Column>>* columns);
+                             vector<std::unique_ptr<Column>>* columns, void* state);
 
-    /*
-    Status prepare_partial_update_states(Tablet* tablet, const std::vector<ColumnUniquePtr>& upserts,
-                                         EditVersion* read_version, uint32_t* next_rowset_id,
-                                         std::vector<std::vector<uint64_t>*>* rss_rowids);
-    */
     Status prepare_partial_update_states(Tablet* tablet, const ColumnUniquePtr& upserts, EditVersion* read_version,
                                          std::vector<uint64_t>* rss_rowids);
 
@@ -258,6 +257,8 @@ public:
                            std::vector<RowsetMetaPB>& rowset_metas_pb);
 
     Status check_and_remove_rowset();
+
+    void get_basic_info_extra(TabletBasicInfo& info);
 
 private:
     friend class Tablet;
@@ -286,8 +287,6 @@ private:
         int64_t compaction_score = 0;
         std::string to_string() const;
     };
-
-    Status _get_rowsets(int64_t version, std::vector<RowsetSharedPtr>* rowsets, EditVersion* full_version);
 
     // used for PrimaryIndex load
     Status _get_apply_version_and_rowsets(int64_t* version, std::vector<RowsetSharedPtr>* rowsets,
@@ -402,7 +401,7 @@ private:
     int64_t _last_compaction_time_ms = 0;
     std::atomic<int64_t> _last_compaction_success_millis{0};
     std::atomic<int64_t> _last_compaction_failure_millis{0};
-    int64_t _compaction_cost_seek = 32 * 1024 * 1024; // 32MB
+    static const int64_t _compaction_cost_seek = 32 * 1024 * 1024; // 32MB
 
     mutable std::mutex _rowset_stats_lock;
     // maintain current version(applied version) rowsets' stats
@@ -423,11 +422,6 @@ private:
     // the whole BE, and more more operation on this tablet is allowed
     std::atomic<bool> _error{false};
     std::string _error_msg;
-
-    ChunkAllocator* _chunk_allocator = nullptr;
-
-    TabletUpdates(const TabletUpdates&) = delete;
-    const TabletUpdates& operator=(const TabletUpdates&) = delete;
 };
 
 } // namespace starrocks

@@ -58,6 +58,7 @@ import com.starrocks.thrift.TStorageMedium;
 import com.starrocks.thrift.TStorageType;
 import mockit.Mock;
 import mockit.MockUp;
+import org.apache.commons.lang3.concurrent.ConcurrentUtils;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -68,6 +69,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 import javax.validation.constraints.NotNull;
 
@@ -90,7 +92,8 @@ public class LakeTableSchemaChangeJobTest {
     public void before() throws Exception {
         new MockUp<StarOSAgent>() {
             @Mock
-            public List<Long> createShards(int shardCount, int replicaNum, FilePathInfo path, FileCacheInfo cache, long groupId)
+            public List<Long> createShards(int shardCount, FilePathInfo path, FileCacheInfo cache, long groupId,
+                    List<Long> matchShardIds)
                 throws DdlException {
                 for (int i = 0; i < shardCount; i++) {
                     shadowTabletIds.add(GlobalStateMgr.getCurrentState().getNextId());
@@ -149,7 +152,7 @@ public class LakeTableSchemaChangeJobTest {
         builder.setFullPath("s3://test-bucket/object-1");
         FilePathInfo pathInfo = builder.build();
 
-        table.setStorageInfo(pathInfo, false, 0, false);
+        table.setStorageInfo(pathInfo, new StorageCacheInfo(false, 0, false));
         StorageCacheInfo storageCacheInfo = new StorageCacheInfo(false, 0, false);
         partitionInfo.setStorageCacheInfo(partitionId, storageCacheInfo);
 
@@ -731,6 +734,11 @@ public class LakeTableSchemaChangeJobTest {
             @Mock
             public void writeEditLog(LakeTableSchemaChangeJob job) {
                 // nothing to do.
+            }
+
+            @Mock
+            public Future<Boolean> writeEditLogAsync(LakeTableSchemaChangeJob job) {
+                return ConcurrentUtils.constantFuture(true);
             }
 
             @Mock

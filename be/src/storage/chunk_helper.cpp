@@ -217,23 +217,23 @@ template <bool force>
 struct ColumnPtrBuilder {
     template <LogicalType ftype>
     ColumnPtr operator()(size_t chunk_size, const Field& field, int precision, int scale) {
-        auto nullable = [&](ColumnPtr c) -> ColumnPtr {
+        auto NullableIfNeed = [&](ColumnPtr c) -> ColumnPtr {
             return field.is_nullable()
                            ? NullableColumn::create(std::move(c), get_column_ptr<NullColumn, force>(chunk_size))
                            : c;
         };
 
         if constexpr (ftype == TYPE_ARRAY) {
-            auto elements = field.sub_field(0).create_column();
+            auto elements = NullableColumn::wrap_if_necessary(field.sub_field(0).create_column());
             auto offsets = get_column_ptr<UInt32Column, force>(chunk_size);
             auto array = ArrayColumn::create(std::move(elements), offsets);
-            return nullable(array);
+            return NullableIfNeed(array);
         } else if constexpr (ftype == TYPE_MAP) {
-            auto keys = field.sub_field(0).create_column();
-            auto values = field.sub_field(1).create_column();
+            auto keys = NullableColumn::wrap_if_necessary(field.sub_field(0).create_column());
+            auto values = NullableColumn::wrap_if_necessary(field.sub_field(1).create_column());
             auto offsets = get_column_ptr<UInt32Column, force>(chunk_size);
             auto map = MapColumn::create(std::move(keys), std::move(values), offsets);
-            return nullable(map);
+            return NullableIfNeed(map);
         } else if constexpr (ftype == TYPE_STRUCT) {
             std::vector<std::string> names;
             std::vector<ColumnPtr> fields;
@@ -242,17 +242,17 @@ struct ColumnPtrBuilder {
                 fields.template emplace_back(sub_field.create_column());
             }
             auto struct_column = StructColumn::create(std::move(fields), std::move(names));
-            return nullable(struct_column);
+            return NullableIfNeed(struct_column);
         } else {
             switch (ftype) {
             case TYPE_DECIMAL32:
-                return nullable(get_decimal_column_ptr<Decimal32Column, force>(precision, scale, chunk_size));
+                return NullableIfNeed(get_decimal_column_ptr<Decimal32Column, force>(precision, scale, chunk_size));
             case TYPE_DECIMAL64:
-                return nullable(get_decimal_column_ptr<Decimal64Column, force>(precision, scale, chunk_size));
+                return NullableIfNeed(get_decimal_column_ptr<Decimal64Column, force>(precision, scale, chunk_size));
             case TYPE_DECIMAL128:
-                return nullable(get_decimal_column_ptr<Decimal128Column, force>(precision, scale, chunk_size));
+                return NullableIfNeed(get_decimal_column_ptr<Decimal128Column, force>(precision, scale, chunk_size));
             default: {
-                return nullable(get_column_ptr<typename CppColumnTraits<ftype>::ColumnType, force>(chunk_size));
+                return NullableIfNeed(get_column_ptr<typename CppColumnTraits<ftype>::ColumnType, force>(chunk_size));
             }
             }
         }
@@ -394,7 +394,7 @@ ColumnPtr ChunkHelper::column_from_field(const Field& field) {
     }
 }
 
-ChunkPtr ChunkHelper::new_chunk(const Schema& schema, size_t n) {
+ChunkUniquePtr ChunkHelper::new_chunk(const Schema& schema, size_t n) {
     size_t fields = schema.num_fields();
     Columns columns;
     columns.reserve(fields);
@@ -403,15 +403,15 @@ ChunkPtr ChunkHelper::new_chunk(const Schema& schema, size_t n) {
         columns.emplace_back(column_from_field(*f));
         columns.back()->reserve(n);
     }
-    return std::make_shared<Chunk>(std::move(columns), std::make_shared<Schema>(schema));
+    return std::make_unique<Chunk>(std::move(columns), std::make_shared<Schema>(schema));
 }
 
-std::shared_ptr<Chunk> ChunkHelper::new_chunk(const TupleDescriptor& tuple_desc, size_t n) {
+ChunkUniquePtr ChunkHelper::new_chunk(const TupleDescriptor& tuple_desc, size_t n) {
     return new_chunk(tuple_desc.slots(), n);
 }
 
-std::shared_ptr<Chunk> ChunkHelper::new_chunk(const std::vector<SlotDescriptor*>& slots, size_t n) {
-    auto chunk = std::make_shared<Chunk>();
+ChunkUniquePtr ChunkHelper::new_chunk(const std::vector<SlotDescriptor*>& slots, size_t n) {
+    auto chunk = std::make_unique<Chunk>();
     for (const auto slot : slots) {
         auto column = ColumnHelper::create_column(slot->type(), slot->is_nullable());
         column->reserve(n);

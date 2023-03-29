@@ -37,6 +37,7 @@ import com.starrocks.analysis.FunctionCallExpr;
 import com.starrocks.analysis.FunctionName;
 import com.starrocks.analysis.FunctionParams;
 import com.starrocks.analysis.GroupByClause;
+import com.starrocks.analysis.GroupingFunctionCallExpr;
 import com.starrocks.analysis.IntLiteral;
 import com.starrocks.analysis.JoinOperator;
 import com.starrocks.analysis.LargeIntLiteral;
@@ -103,6 +104,7 @@ import io.trino.sql.tree.GenericDataType;
 import io.trino.sql.tree.GenericLiteral;
 import io.trino.sql.tree.GroupBy;
 import io.trino.sql.tree.GroupingElement;
+import io.trino.sql.tree.GroupingOperation;
 import io.trino.sql.tree.GroupingSets;
 import io.trino.sql.tree.Identifier;
 import io.trino.sql.tree.InListExpression;
@@ -294,15 +296,7 @@ public class AstBuilder extends AstVisitor<ParseNode, ParseTreeContext> {
 
         // from == null means a statement without from or from dual, add a single row of null values here
         if (from == null) {
-            ArrayList<Expr> row = new ArrayList<>();
-            List<String> columnNames = new ArrayList<>();
-            row.add(NullLiteral.create(Type.NULL));
-            columnNames.add("");
-            List<ArrayList<Expr>> rows = new ArrayList<>();
-            rows.add(row);
-            ValuesRelation valuesRelation = new ValuesRelation(rows, columnNames);
-            valuesRelation.setNullValues(true);
-            from = valuesRelation;
+            from = ValuesRelation.newDualRelation();
         }
 
         SelectRelation resultSelectRelation = new SelectRelation(
@@ -382,6 +376,12 @@ public class AstBuilder extends AstVisitor<ParseNode, ParseTreeContext> {
         }
 
         return new GroupByClause(groupingSets, GroupByClause.GroupingType.GROUPING_SETS);
+    }
+
+    @Override
+    protected ParseNode visitGroupingOperation(GroupingOperation node, ParseTreeContext context) {
+        List<Expr> arguments = visit(node.getGroupingColumns(), context, Expr.class);
+        return new GroupingFunctionCallExpr("grouping", arguments);
     }
 
     @Override
@@ -619,7 +619,7 @@ public class AstBuilder extends AstVisitor<ParseNode, ParseTreeContext> {
         List<Expr> partitionExprs = visit(node.getPartitionBy(), context, Expr.class);
 
         return new AnalyticExpr(functionCallExpr, partitionExprs, orderByElements,
-                (AnalyticWindow) processOptional(node.getFrame(), context));
+                (AnalyticWindow) processOptional(node.getFrame(), context), null);
     }
 
     private ParseNode visitWindow(FunctionCallExpr functionCallExpr, Window windowSpec, ParseTreeContext context) {

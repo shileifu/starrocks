@@ -44,7 +44,7 @@ import com.starrocks.mysql.privilege.PrivPredicate;
 import com.starrocks.privilege.PrivilegeType;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
-import com.starrocks.system.Backend;
+import com.starrocks.system.DataNode;
 import com.starrocks.thrift.TNetworkAddress;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpMethod;
@@ -89,7 +89,7 @@ public class LoadAction extends RestBaseAction {
 
         // check auth
         if (GlobalStateMgr.getCurrentState().isUsingNewPrivilege()) {
-            checkTableAction(ConnectContext.get(), dbName, tableName, PrivilegeType.TableAction.INSERT);
+            checkTableAction(ConnectContext.get(), dbName, tableName, PrivilegeType.INSERT);
         } else {
             checkTblAuth(ConnectContext.get().getCurrentUserIdentity(), dbName, tableName, PrivPredicate.LOAD);
         }
@@ -100,7 +100,7 @@ public class LoadAction extends RestBaseAction {
             throw new DdlException("No backend alive.");
         }
 
-        Backend backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(backendIds.get(0));
+        DataNode backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(backendIds.get(0));
         if (backend == null) {
             throw new DdlException("No backend alive.");
         }

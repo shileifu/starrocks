@@ -16,29 +16,33 @@
 package com.starrocks.authentication;
 
 import com.google.gson.annotations.SerializedName;
-import com.starrocks.analysis.UserIdentity;
+import com.starrocks.StarRocksFE;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.Pair;
+import com.starrocks.mysql.MysqlPassword;
 import com.starrocks.mysql.privilege.AuthPlugin;
 import com.starrocks.mysql.privilege.Password;
 import com.starrocks.persist.metablock.SRMetaBlockEOFException;
 import com.starrocks.persist.metablock.SRMetaBlockException;
 import com.starrocks.persist.metablock.SRMetaBlockReader;
 import com.starrocks.persist.metablock.SRMetaBlockWriter;
+import com.starrocks.privilege.AuthorizationManager;
 import com.starrocks.privilege.PrivilegeException;
-import com.starrocks.privilege.PrivilegeManager;
 import com.starrocks.privilege.UserPrivilegeCollection;
 import com.starrocks.server.GlobalStateMgr;
-import com.starrocks.sql.ast.AlterUserStmt;
 import com.starrocks.sql.ast.CreateUserStmt;
 import com.starrocks.sql.ast.DropUserStmt;
+import com.starrocks.sql.ast.UserIdentity;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.File;
 import java.io.IOException;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -58,20 +62,45 @@ public class AuthenticationManager {
     // core data structure
     // user identity -> all the authentication information
     // will be manually serialized one by one
-    protected Map<UserIdentity, UserAuthenticationInfo> userToAuthenticationInfo = new TreeMap<>((o1, o2) -> {
-        // make sure that ip > domain > %
-        int compareHostScore = scoreUserIdentityHost(o1).compareTo(scoreUserIdentityHost(o2));
-        if (compareHostScore != 0) {
-            return compareHostScore;
+    protected Map<UserIdentity, UserAuthenticationInfo> userToAuthenticationInfo;
+
+    private static class UserAuthInfoTreeMap extends TreeMap<UserIdentity, UserAuthenticationInfo> {
+        public UserAuthInfoTreeMap() {
+            super((o1, o2) -> {
+                // make sure that ip > domain > %
+                int compareHostScore = scoreUserIdentityHost(o1).compareTo(scoreUserIdentityHost(o2));
+                if (compareHostScore != 0) {
+                    return compareHostScore;
+                }
+                // host type is the same, compare host
+                int compareByHost = o1.getHost().compareTo(o2.getHost());
+                if (compareByHost != 0) {
+                    return compareByHost;
+                }
+                // compare user name
+                return o1.getQualifiedUser().compareTo(o2.getQualifiedUser());
+            });
         }
-        // host type is the same, compare host
-        int compareByHost = o1.getHost().compareTo(o2.getHost());
-        if (compareByHost != 0) {
-            return compareByHost;
+
+        /**
+         * If someone log in from 10.1.1.1 with name "test_user", the matching UserIdentity
+         * can be sorted in the below order,
+         *   1. test_user@10.1.1.1
+         *   2. test_user@["hostname"], in which "hostname" can be resolved to 10.1.1.1.
+         *      If multiple hostnames match the login ip, just return one randomly.
+         *   3. test_user@%, as a fallback.
+         */
+        private static Integer scoreUserIdentityHost(UserIdentity userIdentity) {
+            // ip(1) > hostname(2) > %(3)
+            if (userIdentity.isDomain()) {
+                return 2;
+            }
+            if (userIdentity.getHost().equals(UserAuthenticationInfo.ANY_HOST)) {
+                return 3;
+            }
+            return 1;
         }
-        // compare user name
-        return o1.getQualifiedUser().compareTo(o2.getQualifiedUser());
-    });
+    }
 
     // For legacy reason, user property are set by username instead of full user identity.
     @SerializedName(value = "m")
@@ -108,8 +137,11 @@ public class AuthenticationManager {
                 PlainPasswordAuthenticationProvider.PLUGIN_NAME, new PlainPasswordAuthenticationProvider());
         AuthenticationProviderFactory.installPlugin(
                 LDAPAuthenticationProvider.PLUGIN_NAME, new LDAPAuthenticationProvider());
+        AuthenticationProviderFactory.installPlugin(
+                KerberosAuthenticationProvider.PLUGIN_NAME, new KerberosAuthenticationProvider());
 
         // default user
+        userToAuthenticationInfo = new UserAuthInfoTreeMap();
         UserAuthenticationInfo info = new UserAuthenticationInfo();
         try {
             info.setOrigUserHost(ROOT_USER, UserAuthenticationInfo.ANY_HOST);
@@ -117,7 +149,7 @@ public class AuthenticationManager {
             throw new RuntimeException("should not happened!", e);
         }
         info.setAuthPlugin(PlainPasswordAuthenticationProvider.PLUGIN_NAME);
-        info.setPassword(new byte[0]);
+        info.setPassword(MysqlPassword.EMPTY_PASSWORD);
         userToAuthenticationInfo.put(UserIdentity.ROOT, info);
         userNameToProperty.put(UserIdentity.ROOT.getQualifiedUser(), new UserProperty());
     }
@@ -137,24 +169,6 @@ public class AuthenticationManager {
 
     public String getDefaultPlugin() {
         return DEFAULT_PLUGIN;
-    }
-
-    /**
-     * If someone log in from 10.1.1.1 with name "test_user", the matching UserIdentity can be sorted in the below order
-     * 1. test_user@10.1.1.1
-     * 2. test_user@["hostname"], in which "hostname" can be resolved to 10.1.1.1.
-     * If multiple hostnames match the login ip, just return one randomly.
-     * 3. test_user@%, as a fallback.
-     */
-    private Integer scoreUserIdentityHost(UserIdentity userIdentity) {
-        // ip(1) > hostname(2) > %(3)
-        if (userIdentity.isDomain()) {
-            return 2;
-        }
-        if (userIdentity.getHost().equals(UserAuthenticationInfo.ANY_HOST)) {
-            return 3;
-        }
-        return 1;
     }
 
     private boolean match(String remoteUser, String remoteHost, boolean isDomain, UserAuthenticationInfo info) {
@@ -179,25 +193,31 @@ public class AuthenticationManager {
         }
     }
 
+    public Map.Entry<UserIdentity, UserAuthenticationInfo> getBestMatchedUserIdentity(
+            String remoteUser, String remoteHost) {
+        return userToAuthenticationInfo.entrySet().stream()
+                .filter(entry -> match(remoteUser, remoteHost, entry.getKey().isDomain(), entry.getValue()))
+                .findFirst().orElse(null);
+    }
+
     public UserIdentity checkPassword(String remoteUser, String remoteHost, byte[] remotePasswd, byte[] randomString) {
-        Iterator<Map.Entry<UserIdentity, UserAuthenticationInfo>> it = userToAuthenticationInfo.entrySet().iterator();
-        while (it.hasNext()) {
-            Map.Entry<UserIdentity, UserAuthenticationInfo> entry = it.next();
-            UserIdentity userIdentity = entry.getKey();
-            UserAuthenticationInfo info = entry.getValue();
-            if (match(remoteUser, remoteHost, userIdentity.isDomain(), info)) {
-                try {
-                    AuthenticationProvider provider = AuthenticationProviderFactory.create(info.getAuthPlugin());
-                    provider.authenticate(remoteUser, remoteHost, remotePasswd, randomString, info);
-                    return userIdentity;
-                } catch (AuthenticationException e) {
-                    LOG.debug("failed to authentication, ", e);
-                }
-                return null;  // authentication failed
+        Map.Entry<UserIdentity, UserAuthenticationInfo> matchedUserIdentity =
+                getBestMatchedUserIdentity(remoteUser, remoteHost);
+        if (matchedUserIdentity == null) {
+            LOG.debug("cannot find user {}@{}", remoteUser, remoteHost);
+        } else {
+            try {
+                AuthenticationProvider provider =
+                        AuthenticationProviderFactory.create(matchedUserIdentity.getValue().getAuthPlugin());
+                provider.authenticate(remoteUser, remoteHost, remotePasswd, randomString,
+                        matchedUserIdentity.getValue());
+                return matchedUserIdentity.getKey();
+            } catch (AuthenticationException e) {
+                LOG.debug("failed to authenticate, ", e);
             }
         }
-        LOG.debug("cannot find user {}@{}", remoteUser, remoteHost);
-        return null; // cannot find user
+
+        return null;
     }
 
     public UserIdentity checkPlainPassword(String remoteUser, String remoteHost, String remotePasswd) {
@@ -215,44 +235,53 @@ public class AuthenticationManager {
     }
 
     public void createUser(CreateUserStmt stmt) throws DdlException {
-        UserIdentity userIdentity = stmt.getUserIdent();
+        UserIdentity userIdentity = stmt.getUserIdentity();
         UserAuthenticationInfo info = stmt.getAuthenticationInfo();
         writeLock();
         try {
-            updateUserNoLock(userIdentity, info, false);
+            if (userToAuthenticationInfo.containsKey(userIdentity)) {
+                // Existence verification has been performed in the Analyzer stage. If it exists here,
+                // it may be that other threads have performed the same operation, and return directly here
+                LOG.info("Operation CREATE USER failed for " + stmt.getUserIdentity()
+                        + " : user " + stmt.getUserIdentity() + " already exists");
+                return;
+            }
+            userToAuthenticationInfo.put(userIdentity, info);
+
             UserProperty userProperty = null;
             if (!userNameToProperty.containsKey(userIdentity.getQualifiedUser())) {
                 userProperty = new UserProperty();
                 userNameToProperty.put(userIdentity.getQualifiedUser(), userProperty);
             }
             GlobalStateMgr globalStateMgr = GlobalStateMgr.getCurrentState();
-            PrivilegeManager privilegeManager = globalStateMgr.getPrivilegeManager();
+            AuthorizationManager authorizationManager = globalStateMgr.getAuthorizationManager();
             // init user privilege
-            UserPrivilegeCollection collection = privilegeManager.onCreateUser(userIdentity);
-            short pluginId = privilegeManager.getProviderPluginId();
-            short pluginVersion = privilegeManager.getProviderPluginVersion();
+            UserPrivilegeCollection collection = authorizationManager.onCreateUser(userIdentity, stmt.getDefaultRoles());
+
+            short pluginId = authorizationManager.getProviderPluginId();
+            short pluginVersion = authorizationManager.getProviderPluginVersion();
             globalStateMgr.getEditLog().logCreateUser(
                     userIdentity, info, userProperty, collection, pluginId, pluginVersion);
 
-        } catch (AuthenticationException | PrivilegeException e) {
-            throw new DdlException("failed to create user " + userIdentity, e);
+        } catch (PrivilegeException e) {
+            throw new DdlException("failed to create user " + userIdentity + " : " + e.getMessage(), e);
         } finally {
             writeUnlock();
         }
     }
 
-    public void alterUser(AlterUserStmt stmt) throws DdlException {
-        UserIdentity userIdentity = stmt.getUserIdent();
-        UserAuthenticationInfo info = stmt.getAuthenticationInfo();
-        updateUserWithAuthenticationInfo(userIdentity, info);
-    }
-
-    public void updateUserWithAuthenticationInfo(UserIdentity userIdentity,
-                                                 UserAuthenticationInfo info) throws DdlException {
+    public void alterUser(UserIdentity userIdentity, UserAuthenticationInfo userAuthenticationInfo) throws DdlException {
         writeLock();
         try {
-            updateUserNoLock(userIdentity, info, true);
-            GlobalStateMgr.getCurrentState().getEditLog().logAlterUser(userIdentity, info);
+            if (!userToAuthenticationInfo.containsKey(userIdentity)) {
+                // Existence verification has been performed in the Analyzer stage. If it not exists here,
+                // it may be that other threads have performed the same operation, and return directly here
+                LOG.info("Operation ALTER USER failed for " + userIdentity + " : user " + userIdentity + " not exists");
+                return;
+            }
+
+            updateUserNoLock(userIdentity, userAuthenticationInfo, true);
+            GlobalStateMgr.getCurrentState().getEditLog().logAlterUser(userIdentity, userAuthenticationInfo);
         } catch (AuthenticationException e) {
             throw new DdlException("failed to alter user " + userIdentity, e);
         } finally {
@@ -299,24 +328,24 @@ public class AuthenticationManager {
     }
 
     public void dropUser(DropUserStmt stmt) throws DdlException {
-        UserIdentity userIdentity = stmt.getUserIdent();
+        UserIdentity userIdentity = stmt.getUserIdentity();
         writeLock();
         try {
             dropUserNoLock(userIdentity);
             // drop user privilege as well
-            GlobalStateMgr.getCurrentState().getPrivilegeManager().onDropUser(userIdentity);
+            GlobalStateMgr.getCurrentState().getAuthorizationManager().onDropUser(userIdentity);
             GlobalStateMgr.getCurrentState().getEditLog().logDropUser(userIdentity);
         } finally {
             writeUnlock();
         }
     }
 
-    public void replayDropUser(UserIdentity userIdentity) throws DdlException {
+    public void replayDropUser(UserIdentity userIdentity) {
         writeLock();
         try {
             dropUserNoLock(userIdentity);
             // drop user privilege as well
-            GlobalStateMgr.getCurrentState().getPrivilegeManager().onDropUser(userIdentity);
+            GlobalStateMgr.getCurrentState().getAuthorizationManager().onDropUser(userIdentity);
         } finally {
             writeUnlock();
         }
@@ -325,7 +354,7 @@ public class AuthenticationManager {
     private void dropUserNoLock(UserIdentity userIdentity) {
         // 1. remove from userToAuthenticationInfo
         if (!userToAuthenticationInfo.containsKey(userIdentity)) {
-            LOG.warn("cannot find user {}", userIdentity);
+            LOG.info("Operation DROP USER failed for " + userIdentity + " : user " + userIdentity + " not exists");
             return;
         }
         userToAuthenticationInfo.remove(userIdentity);
@@ -356,7 +385,7 @@ public class AuthenticationManager {
             }
 
             GlobalStateMgr globalStateMgr = GlobalStateMgr.getCurrentState();
-            globalStateMgr.getPrivilegeManager().replayUpdateUserPrivilegeCollection(
+            globalStateMgr.getAuthorizationManager().replayUpdateUserPrivilegeCollection(
                     userIdentity, privilegeCollection, pluginId, pluginVersion);
         } finally {
             writeUnlock();
@@ -476,7 +505,7 @@ public class AuthenticationManager {
             try {
                 // 1 json for myself
                 ret = (AuthenticationManager) reader.readJson(AuthenticationManager.class);
-                ret.userToAuthenticationInfo = new HashMap<>();
+                ret.userToAuthenticationInfo = new UserAuthInfoTreeMap();
                 // 1 json for num user
                 int numUser = (int) reader.readJson(int.class);
                 LOG.info("loading {} users", numUser);
@@ -507,8 +536,8 @@ public class AuthenticationManager {
         return isLoaded;
     }
 
-    public void setLoaded() {
-        isLoaded = true;
+    public void setLoaded(boolean loaded) {
+        isLoaded = loaded;
     }
 
     /**
@@ -537,5 +566,53 @@ public class AuthenticationManager {
         UserProperty userProperty = new UserProperty();
         userProperty.setMaxConn(maxConn);
         userNameToProperty.put(userName, new UserProperty());
+    }
+
+    private Class<?> authClazz = null;
+    public static final String KRB5_AUTH_CLASS_NAME = "com.starrocks.plugins.auth.KerberosAuthentication";
+    public static final String KRB5_AUTH_JAR_PATH = StarRocksFE.STARROCKS_HOME_DIR + "/lib/starrocks-kerberos.jar";
+
+    public boolean isSupportKerberosAuth() {
+        if (!Config.enable_authentication_kerberos) {
+            LOG.error("enable_authentication_kerberos need to be set to true");
+            return false;
+        }
+
+        if (Config.authentication_kerberos_service_principal.isEmpty()) {
+            LOG.error("authentication_kerberos_service_principal must be set in config");
+            return false;
+        }
+
+        if (Config.authentication_kerberos_service_key_tab.isEmpty()) {
+            LOG.error("authentication_kerberos_service_key_tab must be set in config");
+            return false;
+        }
+
+        if (authClazz == null) {
+            try {
+                File jarFile = new File(KRB5_AUTH_JAR_PATH);
+                if (!jarFile.exists()) {
+                    LOG.error("Can not found jar file at {}", KRB5_AUTH_JAR_PATH);
+                    return false;
+                } else {
+                    ClassLoader loader = URLClassLoader.newInstance(
+                            new URL[] {
+                                    jarFile.toURL()
+                            },
+                            getClass().getClassLoader()
+                    );
+                    authClazz = Class.forName(AuthenticationManager.KRB5_AUTH_CLASS_NAME, true, loader);
+                }
+            } catch (Exception e) {
+                LOG.error("Failed to load {}", AuthenticationManager.KRB5_AUTH_CLASS_NAME, e);
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public Class<?> getAuthClazz() {
+        return authClazz;
     }
 }

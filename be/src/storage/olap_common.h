@@ -261,6 +261,11 @@ struct OlapReaderStatistics {
     int64_t total_columns_data_page_count = 0;
 
     int64_t runtime_stats_filtered = 0;
+
+    // for lake tablet
+    int64_t io_ns_from_local_disk = 0;
+    int64_t compressed_bytes_from_local_disk = 0;
+    int64_t pages_from_local_disk = 0;
 };
 
 typedef uint32_t ColumnId;
@@ -283,14 +288,12 @@ struct RowsetId {
     // to compatiable with old version
     void init(int64_t rowset_id) { init(1, rowset_id, 0, 0); }
 
-    void init(int64_t high, int64_t middle, int64_t low) { init(high >> 56, high & LOW_56_BITS, middle, low); }
-
-    void init(int64_t id_version, int64_t high_without_version, int64_t middle, int64_t low) {
+    void init(int64_t id_version, int64_t high, int64_t middle, int64_t low) {
         version = static_cast<int8_t>(id_version);
-        if (UNLIKELY(high_without_version >= MAX_ROWSET_ID)) {
-            LOG(FATAL) << "inc rowsetid is too large:" << high_without_version;
+        if (UNLIKELY(high >= MAX_ROWSET_ID)) {
+            LOG(FATAL) << "inc rowsetid is too large:" << high;
         }
-        hi = (id_version << 56) + (high_without_version & LOW_56_BITS);
+        hi = (id_version << 56) + (high & LOW_56_BITS);
         mi = middle;
         lo = low;
     }
@@ -327,16 +330,6 @@ struct RowsetId {
     friend std::ostream& operator<<(std::ostream& out, const RowsetId& rowset_id) {
         out << rowset_id.to_string();
         return out;
-    }
-};
-
-struct HashOfRowsetId {
-    size_t operator()(const RowsetId& rowset_id) const {
-        size_t seed = 0;
-        seed = HashUtil::hash64(&rowset_id.hi, sizeof(rowset_id.hi), seed);
-        seed = HashUtil::hash64(&rowset_id.mi, sizeof(rowset_id.mi), seed);
-        seed = HashUtil::hash64(&rowset_id.lo, sizeof(rowset_id.lo), seed);
-        return seed;
     }
 };
 

@@ -18,6 +18,7 @@
 
 #include "column/column.h"
 #include "column/fixed_length_column.h"
+#include "column/nullable_column.h"
 #include "column/vectorized_fwd.h"
 
 namespace starrocks {
@@ -148,7 +149,7 @@ public:
         return _keys->container_memory_usage() + _values->container_memory_usage() + _offsets->container_memory_usage();
     }
 
-    size_t element_memory_usage(size_t from, size_t size) const override;
+    size_t reference_memory_usage(size_t from, size_t size) const override;
 
     void swap_column(Column& rhs) override;
 
@@ -178,18 +179,23 @@ public:
 
     const Column& keys() const { return *_keys; }
     ColumnPtr& keys_column() { return _keys; }
+    ColumnPtr keys_column() const { return _keys; }
 
     const Column& values() const { return *_values; }
     ColumnPtr& values_column() { return _values; }
+    ColumnPtr values_column() const { return _values; }
 
     size_t get_map_size(size_t idx) const;
+    std::pair<size_t, size_t> get_map_offset_size(size_t idx) const;
 
     Status unfold_const_children(const starrocks::TypeDescriptor& type) override;
 
+    void remove_duplicated_keys();
+
 private:
-    // keys must be NullableColumn
+    // Keys must be NullableColumn to facilitate handling nested types.
     ColumnPtr _keys;
-    // values must be NullableColumn
+    // Values must be NullableColumn to facilitate handling nested types.
     ColumnPtr _values;
     // Offsets column will store the start position of every map element.
     // Offsets store more one data to indicate the end position.

@@ -37,7 +37,7 @@ import com.starrocks.clone.BackendLoadStatistic.Classification;
 import com.starrocks.common.Config;
 import com.starrocks.common.Pair;
 import com.starrocks.server.GlobalStateMgr;
-import com.starrocks.system.Backend;
+import com.starrocks.system.DataNode;
 import com.starrocks.system.SystemInfoService;
 import com.starrocks.thrift.TStorageMedium;
 import org.apache.logging.log4j.LogManager;
@@ -314,10 +314,10 @@ public class DiskAndTabletLoadReBalancer extends Rebalancer {
             throws SchedException {
         TabletScheduler.PathSlot srcBePathSlot = backendsWorkingSlots.get(beId);
         if (srcBePathSlot == null) {
-            throw new SchedException(SchedException.Status.UNRECOVERABLE, "working slots not exist for src be");
+            throw new SchedException(SchedException.Status.UNRECOVERABLE, "working slots not exist for be: " + beId);
         }
         if (srcBePathSlot.takeSlot(pathHash) == -1) {
-            throw new SchedException(SchedException.Status.SCHEDULE_FAILED, "path busy, wait for next round");
+            throw new SchedException(SchedException.Status.SCHEDULE_RETRY, "path busy, wait for next round");
         }
     }
 
@@ -431,7 +431,7 @@ public class DiskAndTabletLoadReBalancer extends Rebalancer {
                 destBEPartitionTablets = getPartitionTablets(destBEStat.getBeId(), medium, -1);
             }
 
-            Backend destBackend = infoService.getBackend(destBEStat.getBeId());
+            DataNode destBackend = infoService.getBackend(destBEStat.getBeId());
             if (destBackend == null) {
                 destBEIndex++;
                 destBEChanged = true;
@@ -816,7 +816,7 @@ public class DiskAndTabletLoadReBalancer extends Rebalancer {
     private Map<String, List<Long>> getHostGroups(List<Long> backendIds) {
         Map<String, List<Long>> hostGroups = Maps.newHashMap();
         for (Long backendId : backendIds) {
-            Backend backend = infoService.getBackend(backendId);
+            DataNode backend = infoService.getBackend(backendId);
             if (backend == null) {
                 continue;
             }
@@ -1095,7 +1095,7 @@ public class DiskAndTabletLoadReBalancer extends Rebalancer {
 
                     TabletSchedCtx schedCtx = null;
                     if (!isLocalBalance) {
-                        Backend destBackend = infoService.getBackend(destTablets.first);
+                        DataNode destBackend = infoService.getBackend(destTablets.first);
                         if (destBackend == null) {
                             continue;
                         }
@@ -1228,7 +1228,7 @@ public class DiskAndTabletLoadReBalancer extends Rebalancer {
             if (table == null) {
                 return result;
             }
-            if (table.isLakeTable()) {
+            if (table.isCloudNativeTable()) {
                 // replicas are managed by StarOS and cloud storage.
                 return result;
             }
@@ -1408,12 +1408,18 @@ public class DiskAndTabletLoadReBalancer extends Rebalancer {
                     if (!table.needSchedule(isLocalBalance)) {
                         continue;
                     }
-                    if (table.isLakeTable()) {
+                    if (table.isCloudNativeTable()) {
                         // replicas are managed by StarOS and cloud storage.
                         continue;
                     }
 
                     OlapTable olapTbl = (OlapTable) table;
+                    // Table not in NORMAL state is not allowed to do balance,
+                    // because the change of tablet location can cause Schema change or rollup failed
+                    if (olapTbl.getState() != OlapTable.OlapTableState.NORMAL) {
+                        continue;
+                    }
+
                     for (Partition partition : globalStateMgr.getAllPartitionsIncludeRecycleBin(olapTbl)) {
                         partitionChecked++;
                         if (partitionChecked % partitionBatchNum == 0) {

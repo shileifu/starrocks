@@ -25,9 +25,12 @@ import com.starrocks.catalog.AggregateType;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.ExpressionRangePartitionInfo;
 import com.starrocks.catalog.PartitionInfo;
+import com.starrocks.catalog.PartitionType;
 import com.starrocks.catalog.RangePartitionInfo;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.DdlException;
+import com.starrocks.sql.analyzer.AnalyzerUtils;
+import com.starrocks.sql.analyzer.PartitionExprAnalyzer;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -40,11 +43,13 @@ public class ExpressionPartitionDesc extends PartitionDesc {
     private RangePartitionDesc rangePartitionDesc = null;
 
     public ExpressionPartitionDesc(RangePartitionDesc rangePartitionDesc, Expr expr) {
+        super(expr.getPos());
         this.rangePartitionDesc = rangePartitionDesc;
         this.expr = expr;
     }
 
     public ExpressionPartitionDesc(Expr expr) {
+        super(expr.getPos());
         Preconditions.checkState(expr != null);
         this.expr = expr;
     }
@@ -81,17 +86,37 @@ public class ExpressionPartitionDesc extends PartitionDesc {
     @Override
     public void analyze(List<ColumnDef> columnDefs, Map<String, String> otherProperties) throws AnalysisException {
         if (rangePartitionDesc != null) {
+            rangePartitionDesc.setAutoPartitionTable(true);
             rangePartitionDesc.analyze(columnDefs, otherProperties);
+        }
+
+        SlotRef slotRef = AnalyzerUtils.getSlotRefFromFunctionCall(expr);
+
+        boolean hasExprAnalyze = false;
+        for (ColumnDef columnDef : columnDefs) {
+            if (columnDef.getName().equalsIgnoreCase(slotRef.getColumnName())) {
+                PartitionExprAnalyzer.analyzePartitionExpr(this.expr, columnDef.getType());
+                slotRef.setType(columnDef.getType());
+                hasExprAnalyze = true;
+            }
+        }
+        if (!hasExprAnalyze) {
+            throw new AnalysisException("Partition expr without analyzed.");
         }
     }
 
     @Override
-    public PartitionInfo toPartitionInfo(List<Column> schema, Map<String, Long> partitionNameToId, boolean isTemp)
+    public PartitionInfo toPartitionInfo(List<Column> schema, Map<String, Long> partitionNameToId,
+                                         boolean isTemp, boolean isExprPartition)
             throws DdlException {
+        PartitionType partitionType = PartitionType.RANGE;
+        if (isExprPartition) {
+            partitionType = PartitionType.EXPR_RANGE;
+        }
         // we will support other PartitionInto in the future
         if (rangePartitionDesc == null) {
             // for materialized view express partition.
-            return new ExpressionRangePartitionInfo(Collections.singletonList(expr), schema);
+            return new ExpressionRangePartitionInfo(Collections.singletonList(expr), schema, partitionType);
         }
         List<Column> partitionColumns = Lists.newArrayList();
 
@@ -101,7 +126,7 @@ public class ExpressionPartitionDesc extends PartitionDesc {
         }
 
         ExpressionRangePartitionInfo expressionRangePartitionInfo =
-                new ExpressionRangePartitionInfo(Collections.singletonList(expr), partitionColumns);
+                new ExpressionRangePartitionInfo(Collections.singletonList(expr), partitionColumns, partitionType);
 
         for (SingleRangePartitionDesc desc : getRangePartitionDesc().getSingleRangePartitionDescs()) {
             long partitionId = partitionNameToId.get(desc.getPartitionName());

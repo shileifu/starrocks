@@ -287,10 +287,10 @@ public class SetTest extends PlanTestBase {
         String plan = getVerboseExplain(sql);
         assertContains(plan, "  0:UNION\n" +
                 "  |  output exprs:\n" +
-                "  |      [5, NULL_TYPE, true]\n" +
+                "  |      [5, BOOLEAN, true]\n" +
                 "  |  child exprs:\n" +
-                "  |      [2, NULL_TYPE, true]\n" +
-                "  |      [4, NULL_TYPE, true]");
+                "  |      [2, BOOLEAN, true]\n" +
+                "  |      [4, BOOLEAN, true]");
 
         sql = "select count(*) from (select 1 as c1 union all select null as c1) t group by t.c1";
         plan = getVerboseExplain(sql);
@@ -507,7 +507,7 @@ public class SetTest extends PlanTestBase {
                 "      )\n" +
                 "  ) t;";
         String plan = getVerboseExplain(sql);
-        assertContains(plan, "8:AGGREGATE (update serialize)\n" +
+        assertContains(plan, "7:AGGREGATE (update serialize)\n" +
                 "  |  STREAMING\n" +
                 "  |  group by: [9: day, TINYINT, true]\n" +
                 "  |  cardinality: 1\n" +
@@ -567,7 +567,19 @@ public class SetTest extends PlanTestBase {
             setExecutor.execute();
             Assert.fail();
         } catch (Exception e) {
-            Assert.assertEquals("Scalar subquery should output one column", e.getMessage());
+            Assert.assertEquals("Getting analyzing error. Detail message: Scalar subquery should output one column.",
+                    e.getMessage());
         }
+    }
+
+    @Test
+    public void testMinus() throws Exception {
+        String sql = "select * from t0 minus select * from t1";
+        String plan = getFragmentPlan(sql);
+        assertContains(plan, "0:EXCEPT\n" +
+                "  |  \n" +
+                "  |----4:EXCHANGE\n" +
+                "  |    \n" +
+                "  2:EXCHANGE");
     }
 }

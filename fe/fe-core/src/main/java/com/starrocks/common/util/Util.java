@@ -68,6 +68,8 @@ public class Util {
 
     private static final long DEFAULT_EXEC_CMD_TIMEOUT_MS = 600000L;
 
+    public static final String AUTO_GENERATED_EXPR_ALIAS_PREFIX = "EXPR$";
+
     private static final String[] ORDINAL_SUFFIX =
             new String[] {"th", "st", "nd", "rd", "th", "th", "th", "th", "th", "th"};
 
@@ -427,6 +429,10 @@ public class Util {
     }
 
     public static void validateMetastoreUris(String uris) {
+        if (uris == null) {
+            throw new IllegalArgumentException("Null hive.metastore.uris, " +
+                    "please check your property's key and value of catalog or resource.");
+        }
         URI[] parsedUris = Arrays.stream(uris.split(",")).map(URI::create).toArray(URI[]::new);
         for (URI uri : parsedUris) {
             if (Strings.isNullOrEmpty(uri.getScheme()) || !uri.getScheme().equals("thrift")) {
@@ -441,5 +447,8 @@ public class Util {
             }
         }
     }
-}
 
+    public static String deriveAliasFromOrdinal(int ordinal) {
+        return AUTO_GENERATED_EXPR_ALIAS_PREFIX + ordinal;
+    }
+}

@@ -35,6 +35,10 @@ public:
     static Status list_table_status(const std::string& ip, const int32_t port, const TGetTablesParams& table_params,
                                     TListTableStatusResult* table_result);
 
+    static Status list_materialized_view_status(const std::string& ip, const int32_t port,
+                                                const TGetTablesParams& request,
+                                                TListMaterializedViewStatusResult* result);
+
     static Status get_tables_info(const std::string& ip, const int32_t port, const TGetTablesInfoRequest& request,
                                   TGetTablesInfoResponse* response);
 
@@ -58,11 +62,17 @@ public:
     static Status get_tasks(const std::string& ip, const int32_t port, const TGetTasksParams& var_params,
                             TGetTaskInfoResult* var_result);
 
+    static Status get_loads(const std::string& ip, const int32_t port, const TGetLoadsParams& var_params,
+                            TGetLoadsResult* var_result, int timeout_ms);
+
     static Status get_task_runs(const std::string& ip, const int32_t port, const TGetTasksParams& var_params,
                                 TGetTaskRunInfoResult* var_result);
 
     static Status get_tables_config(const std::string& ip, const int32_t port,
                                     const TGetTablesConfigRequest& var_params, TGetTablesConfigResponse* var_result);
+
+    static Status get_tablet_schedules(const std::string& ip, const int32_t port,
+                                       const TGetTabletScheduleRequest& request, TGetTabletScheduleResponse* response);
 };
 
 template <LogicalType SlotType>

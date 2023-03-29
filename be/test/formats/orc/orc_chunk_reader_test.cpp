@@ -179,12 +179,12 @@ static const uint64_t default_row_group_size = 1000;
 */
 
 SlotDesc default_slot_descs[] = {
-        {"lo_custkey", TypeDescriptor::from_primtive_type(LogicalType::TYPE_TINYINT)},
-        {"lo_orderdate", TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT)},
-        {"lo_orderkey", TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT)},
-        {"lo_orderpriority", TypeDescriptor::from_primtive_type(LogicalType::TYPE_VARCHAR)},
-        {"lo_partkey", TypeDescriptor::from_primtive_type(LogicalType::TYPE_TINYINT)},
-        {"lo_suppkey", TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT)},
+        {"lo_custkey", TypeDescriptor::from_logical_type(LogicalType::TYPE_TINYINT)},
+        {"lo_orderdate", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)},
+        {"lo_orderkey", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)},
+        {"lo_orderpriority", TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR)},
+        {"lo_partkey", TypeDescriptor::from_logical_type(LogicalType::TYPE_TINYINT)},
+        {"lo_suppkey", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)},
         {""},
 };
 
@@ -950,9 +950,9 @@ TEST_F(OrcChunkReaderTest, TestTimestamp) {
 
 TEST_F(OrcChunkReaderTest, TestReadPositionalColumn) {
     SlotDesc slot_descs[] = {
-            {"a", TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT)},
-            {"b", TypeDescriptor::from_primtive_type(LogicalType::TYPE_VARCHAR)},
-            {"c", TypeDescriptor::from_primtive_type(LogicalType::TYPE_DOUBLE)},
+            {"a", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)},
+            {"b", TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR)},
+            {"c", TypeDescriptor::from_logical_type(LogicalType::TYPE_DOUBLE)},
             {""},
     };
     static const std::string input_orc_file = "./be/test/exec/test_data/orc_scanner/orc_test_positional_column.orc";
@@ -1021,6 +1021,87 @@ TEST_F(OrcChunkReaderTest, TestReadPositionalColumn) {
 
 /**
  *
+File Version: 0.12 with FUTURE
+Rows: 1
+Compression: ZLIB
+Compression size: 262144
+Type: struct<k1:int,k2:binary>
+
+Stripe Statistics:
+  Stripe 1:
+    Column 0: count: 1 hasNull: false
+    Column 1: count: 1 hasNull: false bytesOnDisk: 6 min: 2 max: 2 sum: 2
+    Column 2: count: 1 hasNull: false bytesOnDisk: 11 sum: 2
+
+File Statistics:
+  Column 0: count: 1 hasNull: false
+  Column 1: count: 1 hasNull: false bytesOnDisk: 6 min: 2 max: 2 sum: 2
+  Column 2: count: 1 hasNull: false bytesOnDisk: 11 sum: 2
+
+Stripes:
+  Stripe: offset: 3 data: 17 rows: 1 tail: 46 index: 56
+    Stream: column 0 section ROW_INDEX start: 3 length 11
+    Stream: column 1 section ROW_INDEX start: 14 length 24
+    Stream: column 2 section ROW_INDEX start: 38 length 21
+    Stream: column 1 section DATA start: 59 length 6
+    Stream: column 2 section DATA start: 65 length 5
+    Stream: column 2 section LENGTH start: 70 length 6
+    Encoding column 0: DIRECT
+    Encoding column 1: DIRECT_V2
+    Encoding column 2: DIRECT_V2
+
+File length: 344 bytes
+Padding length: 0 bytes
+Padding ratio: 0%
+
+{"k1":2,"k2":[10,188]}
+ */
+TEST_F(OrcChunkReaderTest, TestReadBinaryColumn) {
+    SlotDesc slot_descs[] = {
+            {"k1", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)},
+            {"k2", TypeDescriptor::from_logical_type(LogicalType::TYPE_VARBINARY)},
+            {""},
+    };
+    static const std::string input_orc_file = "./be/test/exec/test_data/orc_scanner/orc_test_binary_column.orc";
+    std::vector<SlotDescriptor*> src_slot_descriptors;
+    ObjectPool pool;
+    create_slot_descriptors(_runtime_state.get(), &pool, &src_slot_descriptors, slot_descs);
+
+    {
+        OrcChunkReader reader(_runtime_state->chunk_size(), src_slot_descriptors);
+        auto input_stream = orc::readLocalFile(input_orc_file);
+        Status st = reader.init(std::move(input_stream));
+        DCHECK(st.ok()) << st.get_error_msg();
+
+        st = reader.read_next();
+        DCHECK(st.ok()) << st.get_error_msg();
+        ChunkPtr ckptr = reader.create_chunk();
+        DCHECK(ckptr != nullptr);
+        st = reader.fill_chunk(&ckptr);
+        DCHECK(st.ok()) << st.get_error_msg();
+        ChunkPtr result = reader.cast_chunk(&ckptr);
+        DCHECK(result != nullptr);
+
+        EXPECT_EQ(result->num_rows(), 1);
+        EXPECT_EQ(result->num_columns(), 2);
+
+        ColumnPtr col = result->get_column_by_slot_id(1);
+        auto* c = starrocks::ColumnHelper::as_raw_column<starrocks::NullableColumn>(col);
+        auto* nulls = c->null_column()->get_data().data();
+        auto* values = ColumnHelper::cast_to_raw<TYPE_VARBINARY>(c->data_column());
+        auto& vb = values->get_bytes();
+        auto& vo = values->get_offset();
+
+        EXPECT_FALSE(nulls[0]);
+        EXPECT_EQ(vo[0], 0);
+        EXPECT_EQ(vo[1], 2);
+        EXPECT_EQ(vb[0], u'\n');
+        EXPECT_EQ(vb[1], u'\274');
+    }
+}
+
+/**
+ *
 { "name": "/home/disk2/zy/StarRocks/be/test/exec/test_data/orc_scanner/orc_test_array_basic.orc",
   "type": "struct<c0:int,c1:array<int>,c2:array<int>,c3:int,c4:double>",
   "attributes": {},
@@ -1047,15 +1128,15 @@ TEST_F(OrcChunkReaderTest, TestReadPositionalColumn) {
 
 TEST_F(OrcChunkReaderTest, TestReadArrayBasic) {
     SlotDesc slot_descs[] = {
-            {"c0", TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT)},
-            {"c1", TypeDescriptor::from_primtive_type(LogicalType::TYPE_ARRAY)},
-            {"c2", TypeDescriptor::from_primtive_type(LogicalType::TYPE_ARRAY)},
-            {"c4", TypeDescriptor::from_primtive_type(LogicalType::TYPE_DOUBLE)},
+            {"c0", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)},
+            {"c1", TypeDescriptor::from_logical_type(LogicalType::TYPE_ARRAY)},
+            {"c2", TypeDescriptor::from_logical_type(LogicalType::TYPE_ARRAY)},
+            {"c4", TypeDescriptor::from_logical_type(LogicalType::TYPE_DOUBLE)},
             {""},
     };
 
-    slot_descs[1].type.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT));
-    slot_descs[2].type.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT));
+    slot_descs[1].type.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_INT));
+    slot_descs[2].type.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_INT));
 
     static const std::string input_orc_file = "./be/test/exec/test_data/orc_scanner/orc_test_array_basic.orc";
     std::vector<SlotDescriptor*> src_slot_descriptors;
@@ -1100,7 +1181,7 @@ TEST_F(OrcChunkReaderTest, TestReadArrayDecimal) {
     type_array.children.emplace_back(TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL64, 9, 9));
 
     SlotDesc slot_descs[] = {
-            {"id", TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT)},
+            {"id", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)},
             {"arr", type_array},
             {""},
     };
@@ -1172,7 +1253,7 @@ Processing data file padding-char.orc [length: 2664]
 
 TEST_F(OrcChunkReaderTest, TestReadPaddingChar) {
     SlotDesc slot_descs[] = {
-            {"col_char", TypeDescriptor::from_primtive_type(LogicalType::TYPE_CHAR)},
+            {"col_char", TypeDescriptor::from_logical_type(LogicalType::TYPE_CHAR)},
             {""},
     };
 
@@ -1248,8 +1329,8 @@ Padding ratio: 0%
  */
 TEST_F(OrcChunkReaderTest, TestColumnWithUpperCase) {
     SlotDesc slot_descs[] = {
-            {"col_upper_int", TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT)},
-            {"col_upper_CHAR", TypeDescriptor::from_primtive_type(LogicalType::TYPE_CHAR)},
+            {"col_upper_int", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)},
+            {"col_upper_CHAR", TypeDescriptor::from_logical_type(LogicalType::TYPE_CHAR)},
             {""},
     };
 
@@ -1302,10 +1383,10 @@ TEST_F(OrcChunkReaderTest, TestReadStructBasic) {
         /**
         * Read all orc data
         */
-        SlotDesc c0{"c0", TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT)};
-        SlotDesc c1{"c1", TypeDescriptor::from_primtive_type(LogicalType::TYPE_STRUCT)};
-        c1.type.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT));
-        c1.type.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_VARCHAR));
+        SlotDesc c0{"c0", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)};
+        SlotDesc c1{"c1", TypeDescriptor::from_logical_type(LogicalType::TYPE_STRUCT)};
+        c1.type.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_INT));
+        c1.type.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR));
         c1.type.field_names.emplace_back("cc0");
         c1.type.field_names.emplace_back("cc1");
 
@@ -1346,9 +1427,9 @@ TEST_F(OrcChunkReaderTest, TestReadStructBasic) {
         /**
          * Load struct partial subfield.
          */
-        SlotDesc c0{"c0", TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT)};
-        SlotDesc c1{"c1", TypeDescriptor::from_primtive_type(LogicalType::TYPE_STRUCT)};
-        c1.type.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_VARCHAR));
+        SlotDesc c0{"c0", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)};
+        SlotDesc c1{"c1", TypeDescriptor::from_logical_type(LogicalType::TYPE_STRUCT)};
+        c1.type.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR));
         c1.type.field_names.emplace_back("cc1");
 
         SlotDesc slot_descs[] = {c0, c1, {""}};
@@ -1400,10 +1481,10 @@ TEST_F(OrcChunkReaderTest, TestReadStructUnorderedField) {
         /**
         *  Load all fields
         */
-        SlotDesc c0{"c0", TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT)};
-        SlotDesc c1{"c1", TypeDescriptor::from_primtive_type(LogicalType::TYPE_STRUCT)};
-        c1.type.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_VARCHAR));
-        c1.type.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT));
+        SlotDesc c0{"c0", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)};
+        SlotDesc c1{"c1", TypeDescriptor::from_logical_type(LogicalType::TYPE_STRUCT)};
+        c1.type.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR));
+        c1.type.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_INT));
         c1.type.field_names.emplace_back("cc1");
         c1.type.field_names.emplace_back("cc0");
 
@@ -1445,10 +1526,10 @@ TEST_F(OrcChunkReaderTest, TestReadStructUnorderedField) {
         /**
         *  Test for different slot desc order
         */
-        SlotDesc c0{"c0", TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT)};
-        SlotDesc c1{"c1", TypeDescriptor::from_primtive_type(LogicalType::TYPE_STRUCT)};
-        c1.type.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_VARCHAR));
-        c1.type.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT));
+        SlotDesc c0{"c0", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)};
+        SlotDesc c1{"c1", TypeDescriptor::from_logical_type(LogicalType::TYPE_STRUCT)};
+        c1.type.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR));
+        c1.type.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_INT));
         c1.type.field_names.emplace_back("cc1");
         c1.type.field_names.emplace_back("cc0");
 
@@ -1492,9 +1573,9 @@ TEST_F(OrcChunkReaderTest, TestReadStructUnorderedField) {
         /**
          * Load partial subfields
         */
-        SlotDesc c0{"c0", TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT)};
-        SlotDesc c1{"c1", TypeDescriptor::from_primtive_type(LogicalType::TYPE_STRUCT)};
-        c1.type.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT));
+        SlotDesc c0{"c0", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)};
+        SlotDesc c1{"c1", TypeDescriptor::from_logical_type(LogicalType::TYPE_STRUCT)};
+        c1.type.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_INT));
         c1.type.field_names.emplace_back("cc0");
 
         SlotDesc slot_descs[] = {c0, c1, {""}};
@@ -1546,9 +1627,9 @@ TEST_F(OrcChunkReaderTest, TestReadStructCaseSensitiveField) {
         /**
         *  Load one subfield
         */
-        SlotDesc c0{"c0", TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT)};
-        SlotDesc c1{"c1", TypeDescriptor::from_primtive_type(LogicalType::TYPE_STRUCT)};
-        c1.type.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_VARCHAR));
+        SlotDesc c0{"c0", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)};
+        SlotDesc c1{"c1", TypeDescriptor::from_logical_type(LogicalType::TYPE_STRUCT)};
+        c1.type.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR));
         c1.type.field_names.emplace_back("Cc1");
 
         SlotDesc slot_descs[] = {c0, c1, {""}};
@@ -1589,9 +1670,9 @@ TEST_F(OrcChunkReaderTest, TestReadStructCaseSensitiveField) {
         /**
         * Test subfield not found
         */
-        SlotDesc c0{"c0", TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT)};
-        SlotDesc c1{"c1", TypeDescriptor::from_primtive_type(LogicalType::TYPE_STRUCT)};
-        c1.type.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_VARCHAR));
+        SlotDesc c0{"c0", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)};
+        SlotDesc c1{"c1", TypeDescriptor::from_logical_type(LogicalType::TYPE_STRUCT)};
+        c1.type.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR));
         c1.type.field_names.emplace_back("cc1");
 
         SlotDesc slot_descs[] = {c0, c1, {""}};
@@ -1624,9 +1705,9 @@ TEST_F(OrcChunkReaderTest, TestUnConvertableType) {
         /**
         *  Load one subfield
         */
-        SlotDesc c0{"c1", TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT)};
-        SlotDesc c1{"c0", TypeDescriptor::from_primtive_type(LogicalType::TYPE_STRUCT)};
-        c1.type.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_VARCHAR));
+        SlotDesc c0{"c1", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)};
+        SlotDesc c1{"c0", TypeDescriptor::from_logical_type(LogicalType::TYPE_STRUCT)};
+        c1.type.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR));
         c1.type.field_names.emplace_back("Cc1");
 
         SlotDesc slot_descs[] = {c0, c1, {""}};
@@ -1654,32 +1735,32 @@ TEST_F(OrcChunkReaderTest, TestReadStructArrayMap) {
         /**
         * Load all test
         */
-        TypeDescriptor c12_array = TypeDescriptor::from_primtive_type(LogicalType::TYPE_ARRAY);
-        c12_array.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_VARCHAR));
+        TypeDescriptor c12_array = TypeDescriptor::from_logical_type(LogicalType::TYPE_ARRAY);
+        c12_array.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR));
 
-        TypeDescriptor c1_struct = TypeDescriptor::from_primtive_type(LogicalType::TYPE_STRUCT);
-        c1_struct.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT));
+        TypeDescriptor c1_struct = TypeDescriptor::from_logical_type(LogicalType::TYPE_STRUCT);
+        c1_struct.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_INT));
         c1_struct.children.push_back(c12_array);
         c1_struct.field_names.emplace_back("c11");
         c1_struct.field_names.emplace_back("c12");
 
-        TypeDescriptor c1_array = TypeDescriptor::from_primtive_type(LogicalType::TYPE_ARRAY);
+        TypeDescriptor c1_array = TypeDescriptor::from_logical_type(LogicalType::TYPE_ARRAY);
         c1_array.children.push_back(c1_struct);
 
-        TypeDescriptor c2_struct = TypeDescriptor::from_primtive_type(LogicalType::TYPE_STRUCT);
-        c2_struct.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT));
-        c2_struct.children.push_back((TypeDescriptor::from_primtive_type(LogicalType::TYPE_VARCHAR)));
+        TypeDescriptor c2_struct = TypeDescriptor::from_logical_type(LogicalType::TYPE_STRUCT);
+        c2_struct.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_INT));
+        c2_struct.children.push_back((TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR)));
         c2_struct.field_names.emplace_back("c21");
         c2_struct.field_names.emplace_back("c22");
 
-        TypeDescriptor c2_map = TypeDescriptor::from_primtive_type(LogicalType::TYPE_MAP);
-        c2_map.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT));
+        TypeDescriptor c2_map = TypeDescriptor::from_logical_type(LogicalType::TYPE_MAP);
+        c2_map.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_INT));
         c2_map.children.push_back(c2_struct);
 
-        TypeDescriptor c2_array = TypeDescriptor::from_primtive_type(LogicalType::TYPE_ARRAY);
+        TypeDescriptor c2_array = TypeDescriptor::from_logical_type(LogicalType::TYPE_ARRAY);
         c2_array.children.push_back(c2_map);
 
-        SlotDesc c0{"c0", TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT)};
+        SlotDesc c0{"c0", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)};
         SlotDesc c1{"c1", c1_array};
         SlotDesc c2{"c2", c2_array};
 
@@ -1736,30 +1817,30 @@ TEST_F(OrcChunkReaderTest, TestReadStructArrayMap) {
         /**
         * Don't load struct subfield c21
         */
-        TypeDescriptor c12_array = TypeDescriptor::from_primtive_type(LogicalType::TYPE_ARRAY);
-        c12_array.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_VARCHAR));
+        TypeDescriptor c12_array = TypeDescriptor::from_logical_type(LogicalType::TYPE_ARRAY);
+        c12_array.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR));
 
-        TypeDescriptor c1_struct = TypeDescriptor::from_primtive_type(LogicalType::TYPE_STRUCT);
-        c1_struct.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT));
+        TypeDescriptor c1_struct = TypeDescriptor::from_logical_type(LogicalType::TYPE_STRUCT);
+        c1_struct.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_INT));
         c1_struct.children.push_back(c12_array);
         c1_struct.field_names.emplace_back("c11");
         c1_struct.field_names.emplace_back("c12");
 
-        TypeDescriptor c1_array = TypeDescriptor::from_primtive_type(LogicalType::TYPE_ARRAY);
+        TypeDescriptor c1_array = TypeDescriptor::from_logical_type(LogicalType::TYPE_ARRAY);
         c1_array.children.push_back(c1_struct);
 
-        TypeDescriptor c2_struct = TypeDescriptor::from_primtive_type(LogicalType::TYPE_STRUCT);
-        c2_struct.children.push_back((TypeDescriptor::from_primtive_type(LogicalType::TYPE_VARCHAR)));
+        TypeDescriptor c2_struct = TypeDescriptor::from_logical_type(LogicalType::TYPE_STRUCT);
+        c2_struct.children.push_back((TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR)));
         c2_struct.field_names.emplace_back("c22");
 
-        TypeDescriptor c2_map = TypeDescriptor::from_primtive_type(LogicalType::TYPE_MAP);
-        c2_map.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT));
+        TypeDescriptor c2_map = TypeDescriptor::from_logical_type(LogicalType::TYPE_MAP);
+        c2_map.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_INT));
         c2_map.children.push_back(c2_struct);
 
-        TypeDescriptor c2_array = TypeDescriptor::from_primtive_type(LogicalType::TYPE_ARRAY);
+        TypeDescriptor c2_array = TypeDescriptor::from_logical_type(LogicalType::TYPE_ARRAY);
         c2_array.children.push_back(c2_map);
 
-        SlotDesc c0{"c0", TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT)};
+        SlotDesc c0{"c0", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)};
         SlotDesc c1{"c1", c1_array};
         SlotDesc c2{"c2", c2_array};
 
@@ -1817,11 +1898,11 @@ TEST_F(OrcChunkReaderTest, TestReadStructArrayMap) {
         /**
         * Load c2 col map's key
         */
-        TypeDescriptor c2_map = TypeDescriptor::from_primtive_type(LogicalType::TYPE_MAP);
-        c2_map.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_INT));
-        c2_map.children.push_back(TypeDescriptor::from_primtive_type(LogicalType::TYPE_UNKNOWN));
+        TypeDescriptor c2_map = TypeDescriptor::from_logical_type(LogicalType::TYPE_MAP);
+        c2_map.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_INT));
+        c2_map.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_UNKNOWN));
 
-        TypeDescriptor c2_array = TypeDescriptor::from_primtive_type(LogicalType::TYPE_ARRAY);
+        TypeDescriptor c2_array = TypeDescriptor::from_logical_type(LogicalType::TYPE_ARRAY);
         c2_array.children.push_back(c2_map);
 
         SlotDesc c2{"c2", c2_array};

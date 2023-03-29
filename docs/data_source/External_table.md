@@ -1,6 +1,8 @@
 # External tables
 
-StarRocks supports access to other data sources by using external tables. External tables are created based on data tables that are stored in other data sources. StarRocks only stores the metadata of the data tables. You can use external tables to directly query data in other data sources. StarRocks supports the following data sources: MySQL, Elasticsearch, Hive, StarRocks, Apache Iceberg, and Apache Hudi. **Currently, you can only write data from another StarRocks cluster into the current StarRocks cluster. You cannot read data from it. For data sources other than StarRocks, you can only read data from these data sources.**
+StarRocks supports access to other data sources by using external tables. External tables are created based on data tables that are stored in other data sources. StarRocks only stores the metadata of the data tables. You can use external tables to directly query data in other data sources. StarRocks supports the following data sources: MySQL, StarRocks, Elasticsearch, Apache Hive™, Apache Iceberg, and Apache Hudi. **Since v3.0, we recommend that you use catalogs to query Hive, Iceberg, and Hudi data.** See [Hive catalog](../data_source/catalog/hive_catalog.md), [Iceberg catalog](../data_source/catalog/iceberg_catalog.md), and [Hudi catalog](../data_source/catalog/hudi_catalog.md). **Currently, you can only write data from another StarRocks cluster into the current StarRocks cluster. You cannot read data from it. For data sources other than StarRocks, you can only read data from these data sources.**
+
+From 2.5 onwards, StarRocks provides the Local Cache feature, which accelerates hot data queriers on external data sources. For more information, see [Local Cache](Block_cache.md)。
 
 ## MySQL external table
 
@@ -168,7 +170,7 @@ When you create an external table, you need to specify the data types of columns
 > **Note**
 >
 > * StarRocks reads the data of the NESTED type by using JSON-related functions.
-> * Elasticsearch automatically flattens multi-dimensional arrays into one-dimensional arrays. StarRocks does the same.
+> * Elasticsearch automatically flattens multi-dimensional arrays into one-dimensional arrays. StarRocks does the same. The support for querying ARRAY data from Elasticsearch is added from v2.5.
 
 ### Predicate pushdown
 
@@ -810,7 +812,7 @@ Make sure that your StarRocks cluster is granted access to the Hive metastore, H
 ### Precautions
 
 * Hudi external tables for Hudi are read-only and can be used only for queries.
-* StarRocks supports querying Copy on Write and Merge On Read tables. For the differences between these two types of tables, see [Table & Query Types](https://hudi.apache.org/docs/table_types/).
+* StarRocks supports querying Copy on Write and Merge On Read tables (MOR tables are supported from v2.5). For the differences between these two types of tables, see [Table & Query Types](https://hudi.apache.org/docs/table_types/).
 * StarRocks supports the following two query types of Hudi: Snapshot Queries and Read Optimized Queries (Hudi only supports performing Read Optimized Queries on Merge On Read tables). Incremental Queries are not supported. For more information about the query types of Hudi, see [Table & Query Types](https://hudi.apache.org/docs/next/table_types/#query-types).
 * StarRocks supports the following compression formats for Hudi files: gzip, zstd, LZ4, and Snappy. The default compression format for Hudi files is gzip.
 * StarRocks cannot synchronize schema changes from Hudi managed tables. For more information, see [Schema Evolution](https://hudi.apache.org/docs/schema_evolution/). If the schema of a Hudi managed table is changed, you must delete the associated Hudi external table from your StarRocks cluster and then re-create that external table.

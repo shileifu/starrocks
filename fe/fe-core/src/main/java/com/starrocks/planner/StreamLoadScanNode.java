@@ -58,7 +58,7 @@ import com.starrocks.common.Config;
 import com.starrocks.load.Load;
 import com.starrocks.load.streamload.StreamLoadInfo;
 import com.starrocks.server.GlobalStateMgr;
-import com.starrocks.system.Backend;
+import com.starrocks.system.DataNode;
 import com.starrocks.thrift.TBrokerRangeDesc;
 import com.starrocks.thrift.TBrokerScanRange;
 import com.starrocks.thrift.TBrokerScanRangeParams;
@@ -114,7 +114,7 @@ public class StreamLoadScanNode extends LoadScanNode {
 
     private boolean needAssignBE;
 
-    private List<Backend> backends;
+    private List<DataNode> backends;
     private int nextBe = 0;
     private final Random random = new Random(System.currentTimeMillis());
     private String dbName;
@@ -128,6 +128,8 @@ public class StreamLoadScanNode extends LoadScanNode {
     }
 
     private ParamCreateContext paramCreateContext;
+    private boolean nullExprInAutoIncrement;
+
 
     // used to construct for streaming loading
     public StreamLoadScanNode(TUniqueId loadId, PlanNodeId id, TupleDescriptor tupleDesc, Table dstTable, StreamLoadInfo streamLoadInfo) {
@@ -139,6 +141,7 @@ public class StreamLoadScanNode extends LoadScanNode {
         this.numInstances = 1;
         this.nextBe = 0;
         this.needAssignBE = false;
+        this.nullExprInAutoIncrement = true;
     }
 
     public StreamLoadScanNode(
@@ -156,6 +159,7 @@ public class StreamLoadScanNode extends LoadScanNode {
         this.needAssignBE = false;
         this.txnId = txnId;
         this.curChannelId = 0;
+        this.nullExprInAutoIncrement = true;
     }
 
     public void setUseVectorizedLoad(boolean useVectorizedLoad) {
@@ -164,6 +168,10 @@ public class StreamLoadScanNode extends LoadScanNode {
 
     public void setNeedAssignBE(boolean needAssignBE) {
         this.needAssignBE = needAssignBE;
+    }
+
+    public boolean nullExprInAutoIncrement() {
+        return nullExprInAutoIncrement;
     }
 
     @Override
@@ -233,7 +241,7 @@ public class StreamLoadScanNode extends LoadScanNode {
 
     private void assignBackends() throws UserException {
         backends = Lists.newArrayList();
-        for (Backend be : GlobalStateMgr.getCurrentSystemInfo().getIdToBackend().values()) {
+        for (DataNode be : GlobalStateMgr.getCurrentSystemInfo().getIdToBackend().values()) {
             if (be.isAvailable()) {
                 backends.add(be);
             }
@@ -279,8 +287,9 @@ public class StreamLoadScanNode extends LoadScanNode {
                                     + column.getDefaultExpr().getExpr());
                         }
                     } else if (defaultValueType == Column.DefaultValueType.NULL) {
-                        if (column.isAllowNull()) {
+                        if (column.isAllowNull() || column.isAutoIncrement()) {
                             expr = NullLiteral.create(column.getType());
+                            nullExprInAutoIncrement = false;
                         } else {
                             throw new AnalysisException("column has no source field, column=" + column.getName());
                         }
@@ -377,7 +386,7 @@ public class StreamLoadScanNode extends LoadScanNode {
             locations.setScan_range(scanRange);
 
             if (needAssignBE) {
-                Backend selectedBackend = backends.get(nextBe++);
+                DataNode selectedBackend = backends.get(nextBe++);
                 nextBe = nextBe % backends.size();
                 TScanRangeLocation location = new TScanRangeLocation();
                 location.setBackend_id(selectedBackend.getId());

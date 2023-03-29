@@ -23,6 +23,7 @@
 #include "storage/conjunctive_predicates.h"
 #include "storage/lake/tablet_manager.h"
 #include "storage/lake/tablet_reader.h"
+#include "storage/olap_runtime_range_pruner.hpp"
 #include "storage/predicate_parser.h"
 #include "storage/projection_iterator.h"
 #include "util/starrocks_metrics.h"
@@ -53,7 +54,7 @@ private:
     Status init_global_dicts(TabletReaderParams* params);
     Status init_unused_output_columns(const std::vector<std::string>& unused_output_columns);
     Status init_scanner_columns(std::vector<uint32_t>& scanner_columns);
-    void decide_chunk_size();
+    void decide_chunk_size(bool has_predicate);
     Status init_reader_params(const std::vector<OlapScanRange*>& key_ranges,
                               const std::vector<uint32_t>& scanner_columns, std::vector<uint32_t>& reader_columns);
     Status init_tablet_reader(RuntimeState* state);
@@ -120,20 +121,32 @@ private:
     RuntimeProfile::Counter* _zm_filtered_counter = nullptr;
     RuntimeProfile::Counter* _bf_filtered_counter = nullptr;
     RuntimeProfile::Counter* _seg_zm_filtered_counter = nullptr;
+    RuntimeProfile::Counter* _seg_rt_filtered_counter = nullptr;
     RuntimeProfile::Counter* _sk_filtered_counter = nullptr;
     RuntimeProfile::Counter* _block_seek_timer = nullptr;
     RuntimeProfile::Counter* _block_seek_counter = nullptr;
     RuntimeProfile::Counter* _block_load_timer = nullptr;
     RuntimeProfile::Counter* _block_load_counter = nullptr;
     RuntimeProfile::Counter* _block_fetch_timer = nullptr;
-    RuntimeProfile::Counter* _read_pages_num_counter = nullptr;
-    RuntimeProfile::Counter* _cached_pages_num_counter = nullptr;
     RuntimeProfile::Counter* _bi_filtered_counter = nullptr;
     RuntimeProfile::Counter* _bi_filter_timer = nullptr;
     RuntimeProfile::Counter* _pushdown_predicates_counter = nullptr;
     RuntimeProfile::Counter* _rowsets_read_count = nullptr;
     RuntimeProfile::Counter* _segments_read_count = nullptr;
     RuntimeProfile::Counter* _total_columns_data_page_count = nullptr;
+
+    // IO statistics
+    RuntimeProfile::Counter* _io_statistics_timer = nullptr;
+    RuntimeProfile::Counter* _pages_from_memory_counter = nullptr;
+    RuntimeProfile::Counter* _pages_from_local_disk_counter = nullptr;
+    RuntimeProfile::Counter* _pages_from_remote_counter = nullptr;
+    RuntimeProfile::Counter* _pages_total_counter = nullptr;
+    RuntimeProfile::Counter* _io_from_local_disk_timer = nullptr;
+    RuntimeProfile::Counter* _io_from_remote_timer = nullptr;
+    RuntimeProfile::Counter* _io_total_timer = nullptr;
+    RuntimeProfile::Counter* _compressed_bytes_from_local_disk_counter = nullptr;
+    RuntimeProfile::Counter* _compressed_bytes_from_remote_counter = nullptr;
+    RuntimeProfile::Counter* _compressed_bytes_total_counter = nullptr;
 };
 
 // ================================
@@ -145,6 +158,9 @@ public:
     ~LakeDataSourceProvider() override = default;
 
     DataSourcePtr create_data_source(const TScanRange& scan_range) override;
+
+    Status init(ObjectPool* pool, RuntimeState* state) override;
+    const TupleDescriptor* tuple_descriptor(RuntimeState* state) const override;
 
 protected:
     ConnectorScanNode* _scan_node;
@@ -164,7 +180,7 @@ LakeDataSource::~LakeDataSource() {
 Status LakeDataSource::open(RuntimeState* state) {
     _runtime_state = state;
     const TLakeScanNode& thrift_lake_scan_node = _provider->_t_lake_scan_node;
-    const TupleDescriptor* tuple_desc = state->desc_tbl().get_tuple_descriptor(thrift_lake_scan_node.tuple_id);
+    TupleDescriptor* tuple_desc = state->desc_tbl().get_tuple_descriptor(thrift_lake_scan_node.tuple_id);
     _slots = &tuple_desc->slots();
 
     _runtime_profile->add_info_string("Table", tuple_desc->table_desc()->name());
@@ -180,12 +196,16 @@ Status LakeDataSource::open(RuntimeState* state) {
     // eval const conjuncts
     RETURN_IF_ERROR(OlapScanConjunctsManager::eval_const_conjuncts(_conjunct_ctxs, &_status));
 
+    _dict_optimize_parser.set_mutable_dict_maps(state, state->mutable_query_global_dict_map());
+    DictOptimizeParser::rewrite_descriptor(state, _conjunct_ctxs, thrift_lake_scan_node.dict_string_id_to_int_ids,
+                                           &(tuple_desc->decoded_slots()));
+
     // Init _conjuncts_manager.
     OlapScanConjunctsManager& cm = _conjuncts_manager;
     cm.conjunct_ctxs_ptr = &_conjunct_ctxs;
     cm.tuple_desc = tuple_desc;
     cm.obj_pool = &_obj_pool;
-    cm.key_column_names = &thrift_lake_scan_node.key_column_name;
+    cm.key_column_names = &thrift_lake_scan_node.sort_key_column_names;
     cm.runtime_filters = _runtime_filters;
     cm.runtime_state = state;
 
@@ -327,8 +347,8 @@ Status LakeDataSource::init_scanner_columns(std::vector<uint32_t>& scanner_colum
     return Status::OK();
 }
 
-void LakeDataSource::decide_chunk_size() {
-    if (_read_limit != -1 && _read_limit < _runtime_state->chunk_size()) {
+void LakeDataSource::decide_chunk_size(bool has_predicate) {
+    if (!has_predicate && _read_limit != -1 && _read_limit < _runtime_state->chunk_size()) {
         // Improve for select * from table limit x, x is small
         _params.chunk_size = _read_limit;
     } else {
@@ -341,19 +361,21 @@ Status LakeDataSource::init_reader_params(const std::vector<OlapScanRange*>& key
                                           std::vector<uint32_t>& reader_columns) {
     const TLakeScanNode& thrift_lake_scan_node = _provider->_t_lake_scan_node;
     bool skip_aggregation = thrift_lake_scan_node.is_preaggregation;
+    auto parser = _obj_pool.add(new PredicateParser(*_tablet_schema));
     _params.is_pipeline = true;
     _params.reader_type = READER_QUERY;
     _params.skip_aggregation = skip_aggregation;
     _params.profile = _runtime_profile;
     _params.runtime_state = _runtime_state;
     _params.use_page_cache = !config::disable_storage_page_cache;
-    decide_chunk_size();
+    _params.runtime_range_pruner = OlapRuntimeScanRangePruner(parser, _conjuncts_manager.unarrived_runtime_filters());
 
-    PredicateParser parser(*_tablet_schema);
     std::vector<PredicatePtr> preds;
-    RETURN_IF_ERROR(_conjuncts_manager.get_column_predicates(&parser, &preds));
+    RETURN_IF_ERROR(_conjuncts_manager.get_column_predicates(parser, &preds));
+    decide_chunk_size(!preds.empty());
+    _has_any_predicate = (!preds.empty());
     for (auto& p : preds) {
-        if (parser.can_pushdown(p.get())) {
+        if (parser->can_pushdown(p.get())) {
             _params.predicates.push_back(p.get());
         } else {
             _not_push_down_predicates.add(p.get());
@@ -468,8 +490,6 @@ void LakeDataSource::init_counter(RuntimeState* state) {
     _read_uncompressed_counter = ADD_COUNTER(_runtime_profile, "UncompressedBytesRead", TUnit::BYTES);
 
     _raw_rows_counter = ADD_COUNTER(_runtime_profile, "RawRowsRead", TUnit::UNIT);
-    _read_pages_num_counter = ADD_COUNTER(_runtime_profile, "ReadPagesNum", TUnit::UNIT);
-    _cached_pages_num_counter = ADD_COUNTER(_runtime_profile, "CachedPagesNum", TUnit::UNIT);
     _pushdown_predicates_counter =
             ADD_COUNTER_SKIP_MERGE(_runtime_profile, "PushdownPredicates", TUnit::UNIT, TCounterMergeType::SKIP_ALL);
 
@@ -480,6 +500,8 @@ void LakeDataSource::init_counter(RuntimeState* state) {
     _bf_filtered_counter = ADD_CHILD_COUNTER(_runtime_profile, "BloomFilterFilterRows", TUnit::UNIT, "SegmentInit");
     _seg_zm_filtered_counter =
             ADD_CHILD_COUNTER(_runtime_profile, "SegmentZoneMapFilterRows", TUnit::UNIT, "SegmentInit");
+    _seg_rt_filtered_counter =
+            ADD_CHILD_COUNTER(_runtime_profile, "SegmentRuntimeZoneMapFilterRows", TUnit::UNIT, "SegmentInit");
     _zm_filtered_counter = ADD_CHILD_COUNTER(_runtime_profile, "ZoneMapIndexFilterRows", TUnit::UNIT, "SegmentInit");
     _sk_filtered_counter = ADD_CHILD_COUNTER(_runtime_profile, "ShortKeyFilterRows", TUnit::UNIT, "SegmentInit");
 
@@ -499,8 +521,33 @@ void LakeDataSource::init_counter(RuntimeState* state) {
     _total_columns_data_page_count =
             ADD_CHILD_COUNTER(_runtime_profile, "TotalColumnsDataPageCount", TUnit::UNIT, "SegmentRead");
 
+    // IO statistics
     // IOTime
     _io_timer = ADD_TIMER(_runtime_profile, "IOTime");
+
+    _io_statistics_timer = ADD_TIMER(_runtime_profile, "IOStatistics");
+
+    // Page
+    _pages_from_memory_counter =
+            ADD_CHILD_COUNTER(_runtime_profile, "PagesReadFromMemory", TUnit::UNIT, "IOStatistics");
+    _pages_from_local_disk_counter =
+            ADD_CHILD_COUNTER(_runtime_profile, "PagesReadFromLocalDisk", TUnit::UNIT, "IOStatistics");
+    _pages_from_remote_counter =
+            ADD_CHILD_COUNTER(_runtime_profile, "PagesReadFromRemote", TUnit::UNIT, "IOStatistics");
+    _pages_total_counter = ADD_CHILD_COUNTER(_runtime_profile, "PagesReadTotal", TUnit::UNIT, "IOStatistics");
+
+    // IO time
+    _io_from_local_disk_timer = ADD_CHILD_TIMER(_runtime_profile, "IOTimeFromLocalDisk", "IOStatistics");
+    _io_from_remote_timer = ADD_CHILD_TIMER(_runtime_profile, "IOTimeFromRemote", "IOStatistics");
+    _io_total_timer = ADD_CHILD_TIMER(_runtime_profile, "IOTimeTotal", "IOStatistics");
+
+    // Compressed bytes read
+    _compressed_bytes_from_local_disk_counter =
+            ADD_CHILD_COUNTER(_runtime_profile, "CompressedBytesReadFromLocalDisk", TUnit::BYTES, "IOStatistics");
+    _compressed_bytes_from_remote_counter =
+            ADD_CHILD_COUNTER(_runtime_profile, "CompressedBytesReadFromRemote", TUnit::BYTES, "IOStatistics");
+    _compressed_bytes_total_counter =
+            ADD_CHILD_COUNTER(_runtime_profile, "CompressedBytesReadTotal", TUnit::BYTES, "IOStatistics");
 }
 
 void LakeDataSource::update_realtime_counter(Chunk* chunk) {
@@ -542,12 +589,10 @@ void LakeDataSource::update_counter() {
     COUNTER_UPDATE(_del_vec_filter_counter, _reader->stats().rows_del_vec_filtered);
 
     COUNTER_UPDATE(_seg_zm_filtered_counter, _reader->stats().segment_stats_filtered);
+    COUNTER_UPDATE(_seg_rt_filtered_counter, _reader->stats().runtime_stats_filtered);
     COUNTER_UPDATE(_zm_filtered_counter, _reader->stats().rows_stats_filtered);
     COUNTER_UPDATE(_bf_filtered_counter, _reader->stats().rows_bf_filtered);
     COUNTER_UPDATE(_sk_filtered_counter, _reader->stats().rows_key_range_filtered);
-
-    COUNTER_UPDATE(_read_pages_num_counter, _reader->stats().total_pages_num);
-    COUNTER_UPDATE(_cached_pages_num_counter, _reader->stats().cached_pages_num);
 
     COUNTER_UPDATE(_bi_filtered_counter, _reader->stats().rows_bitmap_index_filtered);
     COUNTER_UPDATE(_bi_filter_timer, _reader->stats().bitmap_index_filter_timer);
@@ -576,6 +621,27 @@ void LakeDataSource::update_counter() {
         COUNTER_UPDATE(c1, _reader->stats().del_filter_ns);
         COUNTER_UPDATE(c2, _reader->stats().rows_del_filtered);
     }
+
+    int64_t pages_total = _reader->stats().total_pages_num;
+    int64_t pages_from_memory = _reader->stats().cached_pages_num;
+    int64_t pages_from_local_disk = _reader->stats().pages_from_local_disk;
+    COUNTER_UPDATE(_pages_from_memory_counter, pages_from_memory);
+    COUNTER_UPDATE(_pages_from_local_disk_counter, pages_from_local_disk);
+    COUNTER_UPDATE(_pages_from_remote_counter, pages_total - pages_from_memory - pages_from_local_disk);
+    COUNTER_UPDATE(_pages_total_counter, pages_total);
+
+    int64_t io_ns = _reader->stats().io_ns;
+    int64_t io_ns_from_local_disk = _reader->stats().io_ns_from_local_disk;
+    COUNTER_UPDATE(_io_from_local_disk_timer, io_ns_from_local_disk);
+    COUNTER_UPDATE(_io_from_remote_timer, io_ns - io_ns_from_local_disk);
+    COUNTER_UPDATE(_io_total_timer, io_ns);
+    COUNTER_UPDATE(_io_statistics_timer, io_ns);
+
+    int64_t compressed_bytes_read = _reader->stats().compressed_bytes_read;
+    int64_t compressed_bytes_from_local_disk = _reader->stats().compressed_bytes_from_local_disk;
+    COUNTER_UPDATE(_compressed_bytes_from_local_disk_counter, compressed_bytes_from_local_disk);
+    COUNTER_UPDATE(_compressed_bytes_from_remote_counter, compressed_bytes_read - compressed_bytes_from_local_disk);
+    COUNTER_UPDATE(_compressed_bytes_total_counter, compressed_bytes_read);
 }
 
 // ================================
@@ -585,6 +651,21 @@ LakeDataSourceProvider::LakeDataSourceProvider(ConnectorScanNode* scan_node, con
 
 DataSourcePtr LakeDataSourceProvider::create_data_source(const TScanRange& scan_range) {
     return std::make_unique<LakeDataSource>(this, scan_range);
+}
+
+Status LakeDataSourceProvider::init(ObjectPool* pool, RuntimeState* state) {
+    if (_t_lake_scan_node.__isset.bucket_exprs) {
+        const auto& bucket_exprs = _t_lake_scan_node.bucket_exprs;
+        _partition_exprs.resize(bucket_exprs.size());
+        for (int i = 0; i < bucket_exprs.size(); ++i) {
+            RETURN_IF_ERROR(Expr::create_expr_tree(pool, bucket_exprs[i], &_partition_exprs[i], state));
+        }
+    }
+    return Status::OK();
+}
+
+const TupleDescriptor* LakeDataSourceProvider::tuple_descriptor(RuntimeState* state) const {
+    return state->desc_tbl().get_tuple_descriptor(_t_lake_scan_node.tuple_id);
 }
 
 // ================================

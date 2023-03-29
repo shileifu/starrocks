@@ -28,12 +28,11 @@ import com.starrocks.catalog.Index;
 import com.starrocks.catalog.KeysType;
 import com.starrocks.catalog.PartitionType;
 import com.starrocks.catalog.PrimitiveType;
+import com.starrocks.catalog.Type;
 import com.starrocks.common.AnalysisException;
-import com.starrocks.common.Config;
 import com.starrocks.common.ErrorCode;
 import com.starrocks.common.ErrorReport;
 import com.starrocks.common.FeConstants;
-import com.starrocks.common.FeNameFormat;
 import com.starrocks.common.util.PropertyAnalyzer;
 import com.starrocks.external.elasticsearch.EsUtil;
 import com.starrocks.qe.ConnectContext;
@@ -42,7 +41,9 @@ import com.starrocks.sql.ast.DistributionDesc;
 import com.starrocks.sql.ast.ExpressionPartitionDesc;
 import com.starrocks.sql.ast.HashDistributionDesc;
 import com.starrocks.sql.ast.PartitionDesc;
+import com.starrocks.sql.common.EngineType;
 import com.starrocks.sql.common.MetaUtils;
+import com.starrocks.sql.parser.NodePosition;
 import org.apache.commons.collections.CollectionUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -63,22 +64,7 @@ public class CreateTableAnalyzer {
 
     private static final String DEFAULT_CHARSET_NAME = "utf8";
 
-    private static final String DEFAULT_ENGINE_NAME = "olap";
-
     private static final String ELASTICSEARCH = "elasticsearch";
-
-    public enum EngineType {
-        OLAP,
-        MYSQL,
-        BROKER,
-        ELASTICSEARCH,
-        HIVE,
-        ICEBERG,
-        HUDI,
-        JDBC,
-        STARROCKS,
-        FILE
-    }
 
     public enum CharsetType {
         UTF8,
@@ -87,11 +73,7 @@ public class CreateTableAnalyzer {
 
     private static String analyzeEngineName(String engineName) {
         if (Strings.isNullOrEmpty(engineName)) {
-            return DEFAULT_ENGINE_NAME;
-        }
-
-        if (engineName.equalsIgnoreCase(CreateTableStmt.LAKE_ENGINE_NAME) && !Config.use_staros) {
-            throw new SemanticException("Engine %s needs 'use_staros = true' config in fe.conf", engineName);
+            return EngineType.defaultEngine().name();
         }
 
         try {
@@ -135,13 +117,31 @@ public class CreateTableAnalyzer {
         KeysDesc keysDesc = statement.getKeysDesc();
         if (statement.getSortKeys() != null) {
             if (keysDesc == null || keysDesc.getKeysType() != KeysType.PRIMARY_KEYS) {
-                throw new IllegalArgumentException("only primary key support sort key");
+                NodePosition keysPos = NodePosition.ZERO;
+                if (keysDesc != null) {
+                    keysPos = keysDesc.getPos();
+                }
+                throw new SemanticException("only primary key support sort key", keysPos);
             }
         }
         List<ColumnDef> columnDefs = statement.getColumnDefs();
+        int autoIncrementColumnCount = 0;
+        for (ColumnDef colDef : columnDefs) {
+            if (colDef.isAutoIncrement()) {
+                autoIncrementColumnCount++;
+                if (colDef.getType() != Type.BIGINT) {
+                    throw new SemanticException("The AUTO_INCREMENT column must be BIGINT", colDef.getPos());
+                }
+            }
+
+            if (autoIncrementColumnCount > 1) {
+                throw new SemanticException("More than one AUTO_INCREMENT column defined in CREATE TABLE Statement",
+                        colDef.getPos());
+            }
+        }
         PartitionDesc partitionDesc = statement.getPartitionDesc();
         // analyze key desc
-        if (statement.isOlapOrLakeEngine()) {
+        if (statement.isOlapEngine()) {
             // olap table or lake table
             if (keysDesc == null) {
                 List<String> keysColumnNames = Lists.newArrayList();
@@ -163,15 +163,15 @@ public class CreateTableAnalyzer {
                 } else {
                     for (ColumnDef columnDef : columnDefs) {
                         keyLength += columnDef.getType().getIndexSize();
-                        if (keysColumnNames.size() >= FeConstants.shortkey_max_column_count
-                                || keyLength > FeConstants.shortkey_maxsize_bytes) {
+                        if (keysColumnNames.size() >= FeConstants.SHORTKEY_MAX_COLUMN_COUNT
+                                || keyLength > FeConstants.SHORTKEY_MAXSIZE_BYTES) {
                             if (keysColumnNames.size() == 0
                                     && columnDef.getType().getPrimitiveType().isCharFamily()) {
                                 keysColumnNames.add(columnDef.getName());
                             }
                             break;
                         }
-                        if (!columnDef.getType().isKeyType()) {
+                        if (!columnDef.getType().canDistributedBy()) {
                             break;
                         }
                         if (columnDef.getType().getPrimitiveType() == PrimitiveType.VARCHAR) {
@@ -212,15 +212,15 @@ public class CreateTableAnalyzer {
         } else {
             // mysql, broker, iceberg, hudi and hive do not need key desc
             if (keysDesc != null) {
-                throw new SemanticException("Create %s table should not contain keys desc", engineName);
+                throw new SemanticException("Create " + engineName + " table should not contain keys desc", keysDesc.getPos());
             }
 
             for (ColumnDef columnDef : columnDefs) {
-                if (engineName.equals("mysql") && columnDef.getType().isComplexType()) {
-                    throw new SemanticException("%s external table don't support complex type", engineName);
+                if (engineName.equalsIgnoreCase("mysql") && columnDef.getType().isComplexType()) {
+                    throw new SemanticException(engineName + " external table don't support complex type", columnDef.getPos());
                 }
 
-                if (!engineName.equals("hive")) {
+                if (!engineName.equalsIgnoreCase("hive")) {
                     columnDef.setIsKey(true);
                 }
             }
@@ -237,7 +237,7 @@ public class CreateTableAnalyzer {
         Set<String> columnSet = Sets.newTreeSet(String.CASE_INSENSITIVE_ORDER);
         for (ColumnDef columnDef : columnDefs) {
             try {
-                columnDef.analyze(statement.isOlapOrLakeEngine());
+                columnDef.analyze(statement.isOlapEngine());
             } catch (AnalysisException e) {
                 LOGGER.error("Column definition analyze failed.", e);
                 throw new SemanticException(e.getMessage());
@@ -261,15 +261,15 @@ public class CreateTableAnalyzer {
         }
 
         if (hasHll && keysDesc.getKeysType() != KeysType.AGG_KEYS) {
-            throw new SemanticException("HLL_UNION must be used in AGG_KEYS");
+            throw new SemanticException("HLL_UNION must be used in AGG_KEYS", keysDesc.getPos());
         }
 
         if (hasBitmap && keysDesc.getKeysType() != KeysType.AGG_KEYS) {
-            throw new SemanticException("BITMAP_UNION must be used in AGG_KEYS");
+            throw new SemanticException("BITMAP_UNION must be used in AGG_KEYS", keysDesc.getPos());
         }
 
         DistributionDesc distributionDesc = statement.getDistributionDesc();
-        if (statement.isOlapOrLakeEngine()) {
+        if (statement.isOlapEngine()) {
             // analyze partition
             Map<String, String> properties = statement.getProperties();
             if (partitionDesc != null) {
@@ -279,7 +279,7 @@ public class CreateTableAnalyzer {
                     } catch (AnalysisException e) {
                         throw new SemanticException(e.getMessage());
                     }
-                } else if (partitionDesc instanceof ExpressionPartitionDesc && Config.enable_expression_partition) {
+                } else if (partitionDesc instanceof ExpressionPartitionDesc) {
                     ExpressionPartitionDesc expressionPartitionDesc = (ExpressionPartitionDesc) partitionDesc;
                     try {
                         expressionPartitionDesc.analyze(columnDefs, properties);
@@ -287,8 +287,8 @@ public class CreateTableAnalyzer {
                         throw new SemanticException(e.getMessage());
                     }
                 } else {
-                    throw new SemanticException(
-                            "Currently only support range and list partition with engine type olap");
+                    throw new SemanticException("Currently only support range and list partition with engine type olap",
+                            partitionDesc.getPos());
                 }
             }
 
@@ -308,12 +308,21 @@ public class CreateTableAnalyzer {
             statement.setDistributionDesc(distributionDesc);
             statement.setProperties(properties);
         } else {
-            if (engineName.equals(ELASTICSEARCH)) {
+            if (engineName.equalsIgnoreCase(ELASTICSEARCH)) {
                 EsUtil.analyzePartitionAndDistributionDesc(partitionDesc, distributionDesc);
             } else {
                 if (partitionDesc != null || distributionDesc != null) {
-                    throw new SemanticException("Create %s table should not contain partition or distribution desc",
-                            engineName);
+                    NodePosition pos = NodePosition.ZERO;
+                    if (partitionDesc != null) {
+                        pos = partitionDesc.getPos();
+                    }
+
+                    if (distributionDesc != null) {
+                        pos = distributionDesc.getPos();
+                    }
+
+                    throw new SemanticException("Create " + engineName + " table should not contain partition " +
+                            "or distribution desc", pos);
                 }
             }
         }
@@ -337,8 +346,8 @@ public class CreateTableAnalyzer {
 
             for (IndexDef indexDef : indexDefs) {
                 indexDef.analyze();
-                if (!statement.isOlapOrLakeEngine()) {
-                    throw new SemanticException("index only support in olap engine at current version.");
+                if (!statement.isOlapEngine()) {
+                    throw new SemanticException("index only support in olap engine at current version", indexDef.getPos());
                 }
                 for (String indexColName : indexDef.getColumns()) {
                     boolean found = false;
@@ -350,8 +359,8 @@ public class CreateTableAnalyzer {
                         }
                     }
                     if (!found) {
-                        throw new SemanticException("BITMAP column does not exist in table. invalid column: %s",
-                                indexColName);
+                        throw new SemanticException("BITMAP column does not exist in table. invalid column: " + indexColName,
+                                indexDef.getPos());
                     }
                 }
                 indexes.add(new Index(indexDef.getIndexName(), indexDef.getColumns(), indexDef.getIndexType(),
@@ -360,12 +369,12 @@ public class CreateTableAnalyzer {
                 distinctCol.add(indexDef.getColumns().stream().map(String::toUpperCase).collect(Collectors.toList()));
             }
             if (distinct.size() != indexes.size()) {
-                throw new SemanticException("index name must be unique.");
+                throw new SemanticException("index name must be unique", indexDefs.get(0).getPos());
             }
             if (distinctCol.size() != indexes.size()) {
-                throw new SemanticException("same index columns have multiple index name is not allowed.");
+                throw new SemanticException("same index columns have multiple index name is not allowed",
+                        indexDefs.get(0).getPos());
             }
         }
     }
-
 }

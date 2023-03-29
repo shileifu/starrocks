@@ -41,7 +41,6 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.starrocks.analysis.StringLiteral;
-import com.starrocks.analysis.UserIdentity;
 import com.starrocks.authentication.AuthenticationManager;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.DiskInfo;
@@ -51,7 +50,6 @@ import com.starrocks.common.AnalysisException;
 import com.starrocks.common.ClientPool;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
-import com.starrocks.common.FeConstants;
 import com.starrocks.common.FeMetaVersion;
 import com.starrocks.common.Pair;
 import com.starrocks.common.StarRocksFEMetaVersion;
@@ -63,6 +61,7 @@ import com.starrocks.journal.JournalTask;
 import com.starrocks.meta.MetaContext;
 import com.starrocks.persist.EditLog;
 import com.starrocks.planner.PlanFragment;
+import com.starrocks.privilege.PrivilegeBuiltinConstants;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.qe.VariableMgr;
@@ -78,8 +77,9 @@ import com.starrocks.sql.ast.CreateViewStmt;
 import com.starrocks.sql.ast.InsertStmt;
 import com.starrocks.sql.ast.QueryStatement;
 import com.starrocks.sql.ast.SelectRelation;
-import com.starrocks.sql.ast.SetVar;
 import com.starrocks.sql.ast.StatementBase;
+import com.starrocks.sql.ast.SystemVariable;
+import com.starrocks.sql.ast.UserIdentity;
 import com.starrocks.sql.common.SqlDigestBuilder;
 import com.starrocks.sql.optimizer.LogicalPlanPrinter;
 import com.starrocks.sql.optimizer.OptExpression;
@@ -97,8 +97,8 @@ import com.starrocks.sql.parser.SqlParser;
 import com.starrocks.sql.plan.ExecPlan;
 import com.starrocks.sql.plan.PlanFragmentBuilder;
 import com.starrocks.statistic.StatsConstants;
-import com.starrocks.system.Backend;
-import com.starrocks.system.BackendCoreStat;
+import com.starrocks.system.DataNode;
+import com.starrocks.system.DataNodeCoreStat;
 import com.starrocks.thrift.TExplainLevel;
 import com.starrocks.thrift.TResultSinkType;
 import org.apache.commons.codec.binary.Hex;
@@ -162,6 +162,7 @@ public class UtFrameUtils {
     public static ConnectContext createDefaultCtx() {
         ConnectContext ctx = new ConnectContext(null);
         ctx.setCurrentUserIdentity(UserIdentity.ROOT);
+        ctx.setCurrentRoleIds(Sets.newHashSet(PrivilegeBuiltinConstants.ROOT_ROLE_ID));
         ctx.setQualifiedUser(AuthenticationManager.ROOT_USER);
         ctx.setGlobalStateMgr(GlobalStateMgr.getCurrentState());
         ctx.setThreadLocalInfo();
@@ -236,10 +237,7 @@ public class UtFrameUtils {
             ClientPool.heartbeatPool = new MockGenericPool.HeatBeatPool("heartbeat");
             ClientPool.backendPool = new MockGenericPool.BackendThriftPool("backend");
 
-            boolean oldRunningUnitTest = FeConstants.runningUnitTest;
-            FeConstants.runningUnitTest = true;
             startFEServer("fe/mocked/test/" + UUID.randomUUID().toString() + "/", startBDB);
-            FeConstants.runningUnitTest = oldRunningUnitTest;
 
             addMockBackend(10001);
 
@@ -259,12 +257,12 @@ public class UtFrameUtils {
         createMinStarRocksCluster(false);
     }
 
-    public static Backend addMockBackend(int backendId) throws Exception {
+    public static DataNode addMockBackend(int backendId) throws Exception {
         // start be
         MockedBackend backend = new MockedBackend("127.0.0.1");
 
         // add be
-        Backend be = new Backend(backendId, backend.getHost(), backend.getHeartBeatPort());
+        DataNode be = new DataNode(backendId, backend.getHost(), backend.getHeartBeatPort());
         Map<String, DiskInfo> disks = Maps.newHashMap();
         DiskInfo diskInfo1 = new DiskInfo(backendId + "/path1");
         diskInfo1.setTotalCapacityB(1000000);
@@ -374,8 +372,8 @@ public class UtFrameUtils {
                 if (optHints != null) {
                     SessionVariable sessionVariable = (SessionVariable) oldSessionVariable.clone();
                     for (String key : optHints.keySet()) {
-                        VariableMgr.setVar(sessionVariable, new SetVar(key, new StringLiteral(optHints.get(key))),
-                                true);
+                        VariableMgr.setSystemVariable(sessionVariable,
+                                new SystemVariable(key, new StringLiteral(optHints.get(key))), true);
                     }
                     connectContext.setSessionVariable(sessionVariable);
                 }
@@ -397,7 +395,7 @@ public class UtFrameUtils {
 
         List<StatementBase> statements;
         try (PlannerProfile.ScopedTimer ignored = PlannerProfile.getScopedTimer("Parser")) {
-            statements = SqlParser.parse(originStmt, connectContext.getSessionVariable().getSqlMode());
+            statements = SqlParser.parse(originStmt, connectContext.getSessionVariable());
         }
         connectContext.getDumpInfo().setOriginStmt(originStmt);
         SessionVariable oldSessionVariable = connectContext.getSessionVariable();
@@ -412,8 +410,8 @@ public class UtFrameUtils {
                 if (optHints != null) {
                     SessionVariable sessionVariable = (SessionVariable) oldSessionVariable.clone();
                     for (String key : optHints.keySet()) {
-                        VariableMgr.setVar(sessionVariable, new SetVar(key, new StringLiteral(optHints.get(key))),
-                                true);
+                        VariableMgr.setSystemVariable(sessionVariable,
+                                new SystemVariable(key, new StringLiteral(optHints.get(key))), true);
                     }
                     connectContext.setSessionVariable(sessionVariable);
                 }
@@ -427,11 +425,19 @@ public class UtFrameUtils {
             testView(connectContext, originStmt, statementBase);
 
             validatePlanConnectedness(execPlan);
-            return new Pair<>(LogicalPlanPrinter.print(execPlan.getPhysicalPlan()), execPlan);
+            return new Pair<>(printPhysicalPlan(execPlan.getPhysicalPlan()), execPlan);
         } finally {
             // before returning we have to restore session variable.
             connectContext.setSessionVariable(oldSessionVariable);
         }
+    }
+
+    public static String printPhysicalPlan(OptExpression execPlan) {
+        return LogicalPlanPrinter.print(execPlan, isPrintPlanTableNames());
+    }
+
+    public static boolean isPrintPlanTableNames() {
+        return false;
     }
 
     private static void testView(ConnectContext connectContext, String originStmt, StatementBase statementBase)
@@ -533,7 +539,7 @@ public class UtFrameUtils {
                 starRocksAssert.withDatabase(dbName);
             }
             starRocksAssert.useDatabase(dbName);
-            starRocksAssert.withTable(entry.getValue());
+            starRocksAssert.withSingleReplicaTable(entry.getValue());
         }
         // create view
         for (Map.Entry<String, String> entry : replayDumpInfo.getCreateViewStmtMap().entrySet()) {
@@ -552,15 +558,16 @@ public class UtFrameUtils {
         }
         // mock be core stat
         for (Map.Entry<Long, Integer> entry : replayDumpInfo.getNumOfHardwareCoresPerBe().entrySet()) {
-            BackendCoreStat.setNumOfHardwareCoresOfBe(entry.getKey(), entry.getValue());
+            DataNodeCoreStat.setNumOfHardwareCoresOfBe(entry.getKey(), entry.getValue());
         }
-        BackendCoreStat.setCachedAvgNumOfHardwareCores(replayDumpInfo.getCachedAvgNumOfHardwareCores());
+        DataNodeCoreStat.setCachedAvgNumOfHardwareCores(replayDumpInfo.getCachedAvgNumOfHardwareCores());
 
         // mock table row count
         for (Map.Entry<String, Map<String, Long>> entry : replayDumpInfo.getPartitionRowCountMap().entrySet()) {
             String dbName = entry.getKey().split("\\.")[0];
             OlapTable replayTable = (OlapTable) connectContext.getGlobalStateMgr().getDb("" + dbName)
                     .getTable(entry.getKey().split("\\.")[1]);
+
             for (Map.Entry<String, Long> partitionEntry : entry.getValue().entrySet()) {
                 setPartitionStatistics(replayTable, partitionEntry.getKey(), partitionEntry.getValue());
             }
@@ -594,9 +601,13 @@ public class UtFrameUtils {
 
     private static Pair<String, ExecPlan> getQueryExecPlan(QueryStatement statement, ConnectContext connectContext) {
         ColumnRefFactory columnRefFactory = new ColumnRefFactory();
+
+        PlannerProfile.ScopedTimer t = PlannerProfile.getScopedTimer("Transformer");
         LogicalPlan logicalPlan = new RelationTransformer(columnRefFactory, connectContext)
                 .transform((statement).getQueryRelation());
+        t.close();
 
+        t = PlannerProfile.getScopedTimer("Optimizer");
         Optimizer optimizer = new Optimizer();
         OptExpression optimizedPlan = optimizer.optimize(
                 connectContext,
@@ -604,17 +615,22 @@ public class UtFrameUtils {
                 new PhysicalPropertySet(),
                 new ColumnRefSet(logicalPlan.getOutputColumn()),
                 columnRefFactory);
+        t.close();
 
+        t = PlannerProfile.getScopedTimer("Builder");
         ExecPlan execPlan = PlanFragmentBuilder
                 .createPhysicalPlan(optimizedPlan, connectContext,
                         logicalPlan.getOutputColumn(), columnRefFactory, new ArrayList<>(),
                         TResultSinkType.MYSQL_PROTOCAL, true);
+        t.close();
 
         return new Pair<>(LogicalPlanPrinter.print(optimizedPlan), execPlan);
     }
 
     private static Pair<String, ExecPlan> getInsertExecPlan(InsertStmt statement, ConnectContext connectContext) {
+        PlannerProfile.ScopedTimer t = PlannerProfile.getScopedTimer("Planner");
         ExecPlan execPlan = new InsertPlanner().plan(statement, connectContext);
+        t.close();
         return new Pair<>(LogicalPlanPrinter.print(execPlan.getPhysicalPlan()), execPlan);
     }
 
@@ -817,6 +833,7 @@ public class UtFrameUtils {
     public static ConnectContext initCtxForNewPrivilege(UserIdentity userIdentity) throws Exception {
         ConnectContext ctx = new ConnectContext(null);
         ctx.setCurrentUserIdentity(userIdentity);
+        ctx.setCurrentRoleIds(Sets.newHashSet(PrivilegeBuiltinConstants.ROOT_ROLE_ID));
         ctx.setQualifiedUser(userIdentity.getQualifiedUser());
         GlobalStateMgr globalStateMgr = GlobalStateMgr.getCurrentState();
         globalStateMgr.initAuth(true);

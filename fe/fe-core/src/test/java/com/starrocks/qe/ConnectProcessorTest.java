@@ -34,8 +34,8 @@
 
 package com.starrocks.qe;
 
+import com.google.common.collect.Sets;
 import com.starrocks.analysis.AccessTestUtil;
-import com.starrocks.analysis.UserIdentity;
 import com.starrocks.authentication.AuthenticationManager;
 import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.mysql.MysqlCapability;
@@ -46,9 +46,11 @@ import com.starrocks.mysql.MysqlErrPacket;
 import com.starrocks.mysql.MysqlOkPacket;
 import com.starrocks.mysql.MysqlSerializer;
 import com.starrocks.plugin.AuditEvent.AuditEventBuilder;
+import com.starrocks.privilege.PrivilegeBuiltinConstants;
 import com.starrocks.proto.PQueryStatistics;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.analyzer.DDLTestBase;
+import com.starrocks.sql.ast.UserIdentity;
 import com.starrocks.thrift.TUniqueId;
 import mockit.Expectations;
 import mockit.Mocked;
@@ -63,6 +65,7 @@ import java.nio.channels.SocketChannel;
 
 public class ConnectProcessorTest extends DDLTestBase {
     private static ByteBuffer initDbPacket;
+    private static ByteBuffer initWarehousePacket;
     private static ByteBuffer changeUserPacket;
     private static ByteBuffer resetConnectionPacket;
     private static ByteBuffer pingPacket;
@@ -85,6 +88,14 @@ public class ConnectProcessorTest extends DDLTestBase {
             serializer.writeInt1(2);
             serializer.writeEofString("testDb1");
             initDbPacket = serializer.toByteBuffer();
+        }
+
+        // Init Warehouse packet
+        {
+            MysqlSerializer serializer = MysqlSerializer.newInstance();
+            serializer.writeInt1(2);
+            serializer.writeEofString("'warehouse aaa'");
+            initWarehousePacket = serializer.toByteBuffer();
         }
 
         // Change user packet
@@ -155,6 +166,7 @@ public class ConnectProcessorTest extends DDLTestBase {
     public void setUp() throws Exception {
         super.setUp();
         initDbPacket.clear();
+        initWarehousePacket.clear();
         pingPacket.clear();
         quitPacket.clear();
         queryPacket.clear();
@@ -313,6 +325,7 @@ public class ConnectProcessorTest extends DDLTestBase {
     public void testInitDb() throws IOException {
         ConnectContext ctx = initMockContext(mockChannel(initDbPacket), GlobalStateMgr.getCurrentState());
         ctx.setCurrentUserIdentity(UserIdentity.ROOT);
+        ctx.setCurrentRoleIds(Sets.newHashSet(PrivilegeBuiltinConstants.ROOT_ROLE_ID));
         ctx.setQualifiedUser(AuthenticationManager.ROOT_USER);
         ConnectProcessor processor = new ConnectProcessor(ctx);
         processor.processOnce();
@@ -324,11 +337,23 @@ public class ConnectProcessorTest extends DDLTestBase {
     public void testInitDbFail() throws IOException {
         ConnectContext ctx = initMockContext(mockChannel(initDbPacket), GlobalStateMgr.getCurrentState());
         ctx.setCurrentUserIdentity(UserIdentity.ROOT);
+        ctx.setCurrentRoleIds(Sets.newHashSet(PrivilegeBuiltinConstants.ROOT_ROLE_ID));
         ctx.setQualifiedUser(AuthenticationManager.ROOT_USER);
         ConnectProcessor processor = new ConnectProcessor(ctx);
         processor.processOnce();
         Assert.assertEquals(MysqlCommand.COM_INIT_DB, myContext.getCommand());
         Assert.assertFalse(myContext.getState().toResponsePacket() instanceof MysqlErrPacket);
+    }
+
+    @Test
+    public void testInitWarehouse() throws IOException {
+        ConnectContext ctx = initMockContext(mockChannel(initWarehousePacket), GlobalStateMgr.getCurrentState());
+        ctx.setCurrentUserIdentity(UserIdentity.ROOT);
+        ctx.setQualifiedUser(AuthenticationManager.ROOT_USER);
+        ConnectProcessor processor = new ConnectProcessor(ctx);
+        processor.processOnce();
+        Assert.assertEquals(MysqlCommand.COM_INIT_DB, myContext.getCommand());
+        Assert.assertTrue(myContext.getState().toResponsePacket() instanceof MysqlOkPacket);
     }
 
     @Test

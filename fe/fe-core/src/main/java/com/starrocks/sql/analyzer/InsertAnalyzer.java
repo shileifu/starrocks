@@ -81,18 +81,19 @@ public class InsertAnalyzer {
 
             if (targetPartitionNames != null) {
                 if (targetPartitionNames.getPartitionNames().isEmpty()) {
-                    throw new SemanticException("No partition specified in partition lists");
+                    throw new SemanticException("No partition specified in partition lists",
+                            targetPartitionNames.getPos());
                 }
 
                 for (String partitionName : targetPartitionNames.getPartitionNames()) {
                     if (Strings.isNullOrEmpty(partitionName)) {
-                        throw new SemanticException("there are empty partition name");
+                        throw new SemanticException("there are empty partition name", targetPartitionNames.getPos());
                     }
 
                     Partition partition = olapTable.getPartition(partitionName, targetPartitionNames.isTemp());
                     if (partition == null) {
                         throw new SemanticException("Unknown partition '%s' in table '%s'", partitionName,
-                                olapTable.getName());
+                                olapTable.getName(), targetPartitionNames.getPos());
                     }
                     targetPartitionIds.add(partition.getId());
                 }
@@ -132,7 +133,7 @@ public class InsertAnalyzer {
         for (Column column : table.getBaseSchema()) {
             Column.DefaultValueType defaultValueType = column.getDefaultValueType();
             if (defaultValueType == Column.DefaultValueType.NULL && !column.isAllowNull() &&
-                    !mentionedColumns.contains(column.getName())) {
+                    !column.isAutoIncrement() && !mentionedColumns.contains(column.getName())) {
                 throw new SemanticException("'%s' must be explicitly mentioned in column permutation",
                         column.getName());
             }
@@ -149,7 +150,8 @@ public class InsertAnalyzer {
                     Column column = targetColumns.get(columnIdx);
                     Column.DefaultValueType defaultValueType = column.getDefaultValueType();
                     if (row.get(columnIdx) instanceof DefaultValueExpr &&
-                            defaultValueType == Column.DefaultValueType.NULL) {
+                            defaultValueType == Column.DefaultValueType.NULL &&
+                            !column.isAutoIncrement()) {
                         throw new SemanticException("Column has no default value, column=%s", column.getName());
                     }
 

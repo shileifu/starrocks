@@ -96,6 +96,7 @@ public final class ColumnRefOperator extends ScalarOperator {
         return new ColumnRefSet(id);
     }
 
+
     @Override
     public String toString() {
         return id + ": " + name;

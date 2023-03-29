@@ -44,6 +44,7 @@ set(EXPR_FILES
   case_expr.cpp
   cast_expr.cpp
   cast_expr_array.cpp
+  cast_expr_json.cpp
   cast_nested.cpp
   column_ref.cpp
   placeholder_ref.cpp
@@ -86,13 +87,8 @@ set(EXPR_FILES
   lambda_function.cpp
   array_map_expr.cpp
   subfield_expr.cpp
+  map_apply_expr.cpp
+  map_expr.cpp
 )
 
 add_library(Exprs ${EXPR_FILES})
-
-# simdjson Runtime Implement Dispatch: https://github.com/simdjson/simdjson/blob/master/doc/implementation-selection.md#runtime-cpu-detection
-# Unset architecture-specific flags to avoid breaking implement runtime dispatch.
-if ("${CMAKE_BUILD_TARGET_ARCH}" STREQUAL "x86" OR "${CMAKE_BUILD_TARGET_ARCH}" STREQUAL "x86_64")
-  set_source_files_properties(json_functions.cpp PROPERTIES COMPILE_FLAGS -mno-avx)
-  set_source_files_properties(json_functions.cpp PROPERTIES COMPILE_FLAGS -mno-avx2)
-endif()

@@ -4,7 +4,7 @@ This topic introduces how to integrate with StarRocks.
 
 ## BI tools
 
-[SuperSet](./superset_support.md)
+[Superset](./superset_support.md)
 
 ## Data Integration
 
@@ -24,7 +24,9 @@ This topic introduces how to integrate with StarRocks.
 
 [Apache Kafka](../loading/RoutineLoad.md)
 
-[Apache pulsar](../loading/RoutineLoad.md)
+## IDE tools
+
+[Jupyter](./jupysql.md)
 
 ## Cluster Management
 

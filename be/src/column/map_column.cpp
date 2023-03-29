@@ -39,6 +39,8 @@ void MapColumn::check_or_die() const {
 
 MapColumn::MapColumn(ColumnPtr keys, ColumnPtr values, UInt32Column::Ptr offsets)
         : _keys(std::move(keys)), _values(std::move(values)), _offsets(std::move(offsets)) {
+    DCHECK(_keys->is_nullable());
+    DCHECK(_values->is_nullable());
     if (_offsets->empty()) {
         _offsets->append(0);
     }
@@ -534,15 +536,21 @@ size_t MapColumn::get_map_size(size_t idx) const {
     return _offsets->get_data()[idx + 1] - _offsets->get_data()[idx];
 }
 
+std::pair<size_t, size_t> MapColumn::get_map_offset_size(size_t idx) const {
+    DCHECK_LT(idx + 1, _offsets->size());
+    return {_offsets->get_data()[idx], _offsets->get_data()[idx + 1] - _offsets->get_data()[idx]};
+}
+
 bool MapColumn::set_null(size_t idx) {
     return false;
 }
 
-size_t MapColumn::element_memory_usage(size_t from, size_t size) const {
+size_t MapColumn::reference_memory_usage(size_t from, size_t size) const {
     DCHECK_LE(from + size, this->size()) << "Range error";
-    return _keys->element_memory_usage(_offsets->get_data()[from], _offsets->get_data()[from + size]) +
-           _values->element_memory_usage(_offsets->get_data()[from], _offsets->get_data()[from + size]) +
-           _offsets->Column::element_memory_usage(from, size);
+    size_t start_offset = _offsets->get_data()[from];
+    size_t elements_num = _offsets->get_data()[from + size] - start_offset;
+    return _keys->reference_memory_usage(start_offset, elements_num) +
+           _values->reference_memory_usage(start_offset, elements_num) + _offsets->reference_memory_usage(from, size);
 }
 
 void MapColumn::swap_column(Column& rhs) {
@@ -616,6 +624,38 @@ Status MapColumn::unfold_const_children(const starrocks::TypeDescriptor& type) {
     _keys = ColumnHelper::unfold_const_column(type.children[0], _keys->size(), _keys);
     _values = ColumnHelper::unfold_const_column(type.children[1], _values->size(), _values);
     return Status::OK();
+}
+
+// keep the last identical key
+void MapColumn::remove_duplicated_keys() {
+    Filter filter(_keys->size(), 1);
+
+    bool has_duplicated_keys = false;
+    UInt32Column::Ptr new_offsets = UInt32Column::create();
+    auto& offsets_vec = new_offsets->get_data();
+    offsets_vec.push_back(0);
+
+    uint32_t new_offset = 0;
+    size_t size = this->size();
+    for (auto i = 0; i < size; ++i) {
+        for (auto j = _offsets->get_data()[i]; j < _offsets->get_data()[i + 1]; ++j) {
+            for (auto k = j + 1; k < _offsets->get_data()[i + 1]; ++k) {
+                if (_keys->equals(j, *_keys, k)) {
+                    filter[j] = 0;
+                    has_duplicated_keys = true;
+                    break;
+                }
+            }
+            new_offset += filter[j];
+        }
+        offsets_vec.push_back(new_offset);
+    }
+    if (has_duplicated_keys) {
+        auto new_keys_size = _keys->filter(filter);
+        auto new_values_size = _values->filter(filter);
+        DCHECK(new_keys_size == new_values_size);
+        _offsets.swap(new_offsets);
+    }
 }
 
 } // namespace starrocks

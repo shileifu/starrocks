@@ -71,9 +71,13 @@ private:
     bool _is_finished = false;
     mutable bool _is_open_done = false;
     int32_t _sender_id;
+    bool _is_cancelled = false;
 
     // STREAM MV
     bool _is_epoch_finished = false;
+
+    // temporarily save chunk during automatic partition creation
+    mutable ChunkPtr _automatic_partition_chunk;
 };
 
 class OlapTableSinkOperatorFactory final : public OperatorFactory {

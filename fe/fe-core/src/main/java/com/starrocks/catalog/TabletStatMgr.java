@@ -41,7 +41,6 @@ import com.starrocks.catalog.MaterializedIndex.IndexExtState;
 import com.starrocks.common.ClientPool;
 import com.starrocks.common.Config;
 import com.starrocks.common.util.LeaderDaemon;
-import com.starrocks.lake.LakeTable;
 import com.starrocks.lake.LakeTablet;
 import com.starrocks.lake.Utils;
 import com.starrocks.proto.TabletStatRequest;
@@ -51,7 +50,7 @@ import com.starrocks.proto.TabletStatResponse.TabletStat;
 import com.starrocks.rpc.BrpcProxy;
 import com.starrocks.rpc.LakeService;
 import com.starrocks.server.GlobalStateMgr;
-import com.starrocks.system.Backend;
+import com.starrocks.system.DataNode;
 import com.starrocks.system.SystemInfoService;
 import com.starrocks.thrift.BackendService;
 import com.starrocks.thrift.TNetworkAddress;
@@ -122,10 +121,10 @@ public class TabletStatMgr extends LeaderDaemon {
     }
 
     private void updateLocalTabletStat() {
-        ImmutableMap<Long, Backend> backends = GlobalStateMgr.getCurrentSystemInfo().getIdToBackend();
+        ImmutableMap<Long, DataNode> backends = GlobalStateMgr.getCurrentSystemInfo().getIdToBackend();
 
         long start = System.currentTimeMillis();
-        for (Backend backend : backends.values()) {
+        for (DataNode backend : backends.values()) {
             BackendService.Client client = null;
             TNetworkAddress address = null;
             boolean ok = false;
@@ -183,26 +182,26 @@ public class TabletStatMgr extends LeaderDaemon {
                 continue;
             }
 
-            List<LakeTable> tables = Lists.newArrayList();
+            List<OlapTable> tables = Lists.newArrayList();
             db.readLock();
             try {
                 for (Table table : db.getTables()) {
-                    if (table.isLakeTable()) {
-                        tables.add((LakeTable) table);
+                    if (table.isCloudNativeTable()) {
+                        tables.add((OlapTable) table);
                     }
                 }
             } finally {
                 db.readUnlock();
             }
 
-            for (LakeTable table : tables) {
+            for (OlapTable table : tables) {
                 updateLakeTableTabletStat(db, table);
             }
         }
     }
 
     @java.lang.SuppressWarnings("squid:S2142")  // allow catch InterruptedException
-    private void updateLakeTableTabletStat(Database db, LakeTable table) {
+    private void updateLakeTableTabletStat(Database db, OlapTable table) {
         // prepare tablet infos
         Map<Long, List<TabletInfo>> beToTabletInfos = Maps.newHashMap();
         Map<Long, Long> partitionToVersion = Maps.newHashMap();
@@ -245,7 +244,7 @@ public class TabletStatMgr extends LeaderDaemon {
         long start = System.currentTimeMillis();
         try {
             for (Map.Entry<Long, List<TabletInfo>> entry : beToTabletInfos.entrySet()) {
-                Backend backend = systemInfoService.getBackend(entry.getKey());
+                DataNode backend = systemInfoService.getBackend(entry.getKey());
                 if (backend == null) {
                     continue;
                 }

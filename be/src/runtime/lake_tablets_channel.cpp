@@ -61,10 +61,14 @@ public:
 
     const TabletsChannelKey& key() const { return _key; }
 
-    Status open(const PTabletWriterOpenRequest& params, std::shared_ptr<OlapTableSchemaParam> schema) override;
+    Status open(const PTabletWriterOpenRequest& params, std::shared_ptr<OlapTableSchemaParam> schema,
+                bool is_incremental) override;
 
     void add_chunk(Chunk* chunk, const PTabletWriterAddChunkRequest& request,
                    PTabletWriterAddBatchResult* response) override;
+
+    Status incremental_open(const PTabletWriterOpenRequest& params,
+                            std::shared_ptr<OlapTableSchemaParam> schema) override;
 
     void cancel() override;
 
@@ -174,7 +178,8 @@ LakeTabletsChannel::~LakeTabletsChannel() {
     _mem_pool.reset();
 }
 
-Status LakeTabletsChannel::open(const PTabletWriterOpenRequest& params, std::shared_ptr<OlapTableSchemaParam> schema) {
+Status LakeTabletsChannel::open(const PTabletWriterOpenRequest& params, std::shared_ptr<OlapTableSchemaParam> schema,
+                                [[maybe_unused]] bool is_incremental) {
     _txn_id = params.txn_id();
     _index_id = params.index_id();
     _schema = schema;
@@ -285,10 +290,10 @@ void LakeTabletsChannel::add_chunk(Chunk* chunk, const PTabletWriterAddChunkRequ
     // Submit `AsyncDeltaWriter::finish()` tasks if needed
     if (request.eos()) {
         int unfinished_senders = _close_sender(request.partition_ids().data(), request.partition_ids().size());
-        close_channel = (unfinished_senders == 0);
-        if (!close_channel) {
+        if (unfinished_senders > 0) {
             count_down_latch.count_down(_delta_writers.size());
-        } else {
+        } else if (unfinished_senders == 0) {
+            close_channel = true;
             VLOG(5) << "Closing channel. txn_id=" << _txn_id;
             std::lock_guard l1(_dirty_partitions_lock);
             for (auto& [tablet_id, dw] : _delta_writers) {
@@ -315,13 +320,17 @@ void LakeTabletsChannel::add_chunk(Chunk* chunk, const PTabletWriterAddChunkRequ
                     count_down_latch.count_down();
                 });
             }
+        } else {
+            count_down_latch.count_down(_delta_writers.size());
+            context->update_status(Status::InternalError("Unexpected state: unfinished_senders < 0"));
         }
     }
 
     // Block the current bthread(not pthread) until all `write()` and `finish()` tasks finished.
     count_down_latch.wait();
 
-    if (context->_response->status().status_code() == TStatusCode::OK) {
+    if (request.eos() || context->_response->status().status_code() == TStatusCode::OK) {
+        // ^^^^^^^^^^ Reject new requests once eos request received.
         sender.next_seq++;
     }
 
@@ -336,7 +345,6 @@ void LakeTabletsChannel::add_chunk(Chunk* chunk, const PTabletWriterAddChunkRequ
 
 int LakeTabletsChannel::_close_sender(const int64_t* partitions, size_t partitions_size) {
     int n = _num_remaining_senders.fetch_sub(1);
-    DCHECK_GE(n, 1);
     std::lock_guard l(_dirty_partitions_lock);
     for (int i = 0; i < partitions_size; i++) {
         _dirty_partitions.insert(partitions[i]);
@@ -374,8 +382,14 @@ Status LakeTabletsChannel::_create_delta_writers(const PTabletWriterOpenRequest&
     std::vector<int64_t> tablet_ids;
     tablet_ids.reserve(params.tablets_size());
     for (const PTabletWithPartition& tablet : params.tablets()) {
-        auto writer = AsyncDeltaWriter::create(_tablet_manager, tablet.tablet_id(), _txn_id, tablet.partition_id(),
-                                               slots, _mem_tracker);
+        std::unique_ptr<AsyncDeltaWriter> writer;
+        if (!params.merge_condition().empty()) {
+            writer = AsyncDeltaWriter::create(_tablet_manager, tablet.tablet_id(), _txn_id, tablet.partition_id(),
+                                              slots, params.merge_condition(), _mem_tracker);
+        } else {
+            writer = AsyncDeltaWriter::create(_tablet_manager, tablet.tablet_id(), _txn_id, tablet.partition_id(),
+                                              slots, _mem_tracker);
+        }
         _delta_writers.emplace(tablet.tablet_id(), std::move(writer));
         tablet_ids.emplace_back(tablet.tablet_id());
     }
@@ -445,6 +459,11 @@ StatusOr<std::unique_ptr<LakeTabletsChannel::WriteContext>> LakeTabletsChannel::
         channel_row_idx_start_points[channel_index]--;
     }
     return std::move(context);
+}
+
+Status LakeTabletsChannel::incremental_open(const PTabletWriterOpenRequest& params,
+                                            std::shared_ptr<OlapTableSchemaParam> schema) {
+    return Status::NotSupported("LakeTabletsChannel::incremental_open");
 }
 
 std::shared_ptr<TabletsChannel> new_lake_tablets_channel(LoadChannel* load_channel, lake::TabletManager* tablet_manager,

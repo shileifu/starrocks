@@ -27,31 +27,28 @@
 
 namespace starrocks {
 
-// AvgResultPT for final result
-template <LogicalType PT, typename = guard::Guard>
-inline constexpr LogicalType PercentileResultPT = PT;
+// AvgResultLT for final result
+template <LogicalType LT, bool isCont, typename = guard::Guard>
+inline constexpr LogicalType PercentileResultLT = LT;
 
-template <LogicalType PT>
-inline constexpr LogicalType PercentileResultPT<PT, ArithmeticPTGuard<PT>> = TYPE_DOUBLE;
+template <LogicalType LT>
+inline constexpr LogicalType PercentileResultLT<LT, true, ArithmeticLTGuard<LT>> = TYPE_DOUBLE;
 
-template <LogicalType PT, typename = guard::Guard>
-struct PercentileContState {
-    using CppType = RunTimeCppType<PT>;
+template <LogicalType LT, typename = guard::Guard>
+struct PercentileState {
+    using CppType = RunTimeCppType<LT>;
     void update(CppType item) { items.emplace_back(item); }
 
     std::vector<CppType> items;
     double rate = 0.0;
 };
 
-template <LogicalType PT>
-class PercentileContAggregateFunction final
-        : public AggregateFunctionBatchHelper<PercentileContState<PT>, PercentileContAggregateFunction<PT>> {
+template <LogicalType LT>
+class PercentileContDiscAggregateFunction
+        : public AggregateFunctionBatchHelper<PercentileState<LT>, PercentileContDiscAggregateFunction<LT>> {
 public:
-    using InputCppType = RunTimeCppType<PT>;
-    using InputColumnType = RunTimeColumnType<PT>;
-    static constexpr auto ResultPT = PercentileResultPT<PT>;
-    using ResultType = RunTimeCppType<ResultPT>;
-    using ResultColumnType = RunTimeColumnType<ResultPT>;
+    using InputCppType = RunTimeCppType<LT>;
+    using InputColumnType = RunTimeColumnType<LT>;
 
     void update(FunctionContext* ctx, const Column** columns, AggDataPtr __restrict state,
                 size_t row_num) const override {
@@ -61,6 +58,7 @@ public:
         if (ctx->get_num_args() == 2) {
             const auto* rate = down_cast<const ConstColumn*>(columns[1]);
             this->data(state).rate = rate->get(row_num).get_double();
+            DCHECK(this->data(state).rate >= 0 && this->data(state).rate <= 1);
         }
     }
 
@@ -101,47 +99,11 @@ public:
         memcpy(bytes.data() + old_size + sizeof(double), &items_size, sizeof(size_t));
         memcpy(bytes.data() + old_size + sizeof(double) + sizeof(size_t), this->data(state).items.data(),
                items_size * sizeof(InputCppType));
-        pdqsort(false, reinterpret_cast<InputCppType*>(bytes.data() + old_size + sizeof(double) + sizeof(size_t)),
+        pdqsort(reinterpret_cast<InputCppType*>(bytes.data() + old_size + sizeof(double) + sizeof(size_t)),
                 reinterpret_cast<InputCppType*>(bytes.data() + old_size + sizeof(double) + sizeof(size_t) +
                                                 items_size * sizeof(InputCppType)));
 
         column->get_offset().emplace_back(new_size);
-    }
-
-    void finalize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
-        using CppType = RunTimeCppType<PT>;
-        std::vector<CppType> new_vector = this->data(state).items;
-        pdqsort(false, new_vector.begin(), new_vector.end());
-        const double& rate = this->data(state).rate;
-
-        ResultColumnType* column = down_cast<ResultColumnType*>(to);
-        if (new_vector.size() == 0) {
-            return;
-        }
-        if (new_vector.size() == 1 || rate == 1) {
-            column->append(new_vector.back());
-            return;
-        }
-
-        double u = (new_vector.size() - 1) * rate;
-        int index = (int)u;
-
-        [[maybe_unused]] ResultType result;
-        if constexpr (pt_is_datetime<PT>) {
-            result.from_unix_second(
-                    new_vector[index].to_unix_second() +
-                    (u - (float)index) * (new_vector[index + 1].to_unix_second() - new_vector[index].to_unix_second()));
-        } else if constexpr (pt_is_date<PT>) {
-            result._julian = new_vector[index]._julian +
-                             (u - (double)index) * (new_vector[index + 1]._julian - new_vector[index]._julian);
-        } else if constexpr (pt_is_arithmetic<PT>) {
-            result = new_vector[index] + (u - (double)index) * (new_vector[index + 1] - new_vector[index]);
-        } else {
-            LOG(ERROR) << "Invalid PrimitiveTypes for percentile_cont function";
-            return;
-        }
-
-        column->append(result);
     }
 
     void convert_to_serialize_format(FunctionContext* ctx, const Columns& src, size_t chunk_size,
@@ -163,8 +125,93 @@ public:
             dst_column->get_offset().push_back(bytes.size());
         }
     }
+};
+
+template <LogicalType LT>
+class PercentileContAggregateFunction final : public PercentileContDiscAggregateFunction<LT> {
+    using InputCppType = RunTimeCppType<LT>;
+    using InputColumnType = RunTimeColumnType<LT>;
+    static constexpr auto ResultLT = PercentileResultLT<LT, true>;
+    using ResultType = RunTimeCppType<ResultLT>;
+    using ResultColumnType = RunTimeColumnType<ResultLT>;
+
+    void finalize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
+        using CppType = RunTimeCppType<LT>;
+        std::vector<CppType> new_vector = std::move(this->data(state).items);
+        pdqsort(new_vector.begin(), new_vector.end());
+        const double& rate = this->data(state).rate;
+
+        ResultColumnType* column = down_cast<ResultColumnType*>(to);
+        DCHECK(!new_vector.empty());
+        if (new_vector.size() == 1 || rate == 1) {
+            column->append(new_vector.back());
+            return;
+        }
+
+        double u = (new_vector.size() - 1) * rate;
+        int index = (int)u;
+
+        [[maybe_unused]] ResultType result;
+        if constexpr (lt_is_datetime<LT>) {
+            result.from_unix_second(
+                    new_vector[index].to_unix_second() +
+                    (u - (float)index) * (new_vector[index + 1].to_unix_second() - new_vector[index].to_unix_second()));
+        } else if constexpr (lt_is_date<LT>) {
+            result._julian = new_vector[index]._julian +
+                             (u - (double)index) * (new_vector[index + 1]._julian - new_vector[index]._julian);
+        } else if constexpr (lt_is_arithmetic<LT>) {
+            result = new_vector[index] + (u - (double)index) * (new_vector[index + 1] - new_vector[index]);
+        } else {
+            // won't go there if percentile_cont is registered correctly
+            throw std::runtime_error("Invalid PrimitiveTypes for percentile_cont function");
+        }
+
+        column->append(result);
+    }
 
     std::string get_name() const override { return "percentile_cont"; }
+};
+
+template <LogicalType LT>
+class PercentileDiscAggregateFunction final : public PercentileContDiscAggregateFunction<LT> {
+    using InputCppType = RunTimeCppType<LT>;
+    using InputColumnType = RunTimeColumnType<LT>;
+    static constexpr auto ResultLT = PercentileResultLT<LT, false>;
+    using ResultType = RunTimeCppType<ResultLT>;
+    using ResultColumnType = RunTimeColumnType<ResultLT>;
+
+    void finalize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
+        using CppType = RunTimeCppType<LT>;
+        std::vector<CppType> new_vector = std::move(this->data(state).items);
+        pdqsort(new_vector.begin(), new_vector.end());
+        const double& rate = this->data(state).rate;
+
+        ResultColumnType* column = down_cast<ResultColumnType*>(to);
+        DCHECK(!new_vector.empty());
+        if (new_vector.size() == 1 || rate == 1) {
+            column->append(new_vector.back());
+            return;
+        }
+
+        // choose the uppper one
+        int index = ceil((new_vector.size() - 1) * rate);
+
+        [[maybe_unused]] ResultType result;
+        if constexpr (lt_is_datetime<LT>) {
+            result.from_unix_second(new_vector[index].to_unix_second());
+        } else if constexpr (lt_is_date<LT>) {
+            result._julian = new_vector[index]._julian;
+        } else if constexpr (lt_is_arithmetic<LT> || lt_is_string<LT> || lt_is_decimal_of_any_version<LT>) {
+            result = new_vector[index];
+        } else {
+            // won't go there if percentile_disc is registered correctly
+            throw std::runtime_error("Invalid PrimitiveTypes for percentile_disc function");
+        }
+
+        column->append(result);
+    }
+
+    std::string get_name() const override { return "percentile_disc"; }
 };
 
 } // namespace starrocks

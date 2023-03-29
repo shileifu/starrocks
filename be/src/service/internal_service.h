@@ -68,6 +68,10 @@ public:
     void transmit_chunk(::google::protobuf::RpcController* controller, const ::starrocks::PTransmitChunkParams* request,
                         ::starrocks::PTransmitChunkResult* response, ::google::protobuf::Closure* done) override;
 
+    void transmit_chunk_via_http(::google::protobuf::RpcController* controller,
+                                 const ::starrocks::PHttpRequest* request, ::starrocks::PTransmitChunkResult* response,
+                                 ::google::protobuf::Closure* done) override;
+
     void transmit_runtime_filter(::google::protobuf::RpcController* controller,
                                  const ::starrocks::PTransmitRuntimeFilterParams* request,
                                  ::starrocks::PTransmitRuntimeFilterResult* response,
@@ -125,6 +129,29 @@ public:
     void submit_mv_maintenance_task(google::protobuf::RpcController* controller,
                                     const PMVMaintenanceTaskRequest* request, PMVMaintenanceTaskResult* response,
                                     google::protobuf::Closure* done) override;
+
+    void local_tablet_reader_open(google::protobuf::RpcController* controller, const PTabletReaderOpenRequest* request,
+                                  PTabletReaderOpenResult* response, google::protobuf::Closure* done) override;
+
+    void local_tablet_reader_close(google::protobuf::RpcController* controller,
+                                   const PTabletReaderCloseRequest* request, PTabletReaderCloseResult* response,
+                                   google::protobuf::Closure* done) override;
+
+    void local_tablet_reader_multi_get(google::protobuf::RpcController* controller,
+                                       const PTabletReaderMultiGetRequest* request,
+                                       PTabletReaderMultiGetResult* response, google::protobuf::Closure* done) override;
+
+    void local_tablet_reader_scan_open(google::protobuf::RpcController* controller,
+                                       const PTabletReaderScanOpenRequest* request,
+                                       PTabletReaderScanOpenResult* response, google::protobuf::Closure* done) override;
+
+    void local_tablet_reader_scan_get_next(google::protobuf::RpcController* controller,
+                                           const PTabletReaderScanGetNextRequest* request,
+                                           PTabletReaderScanGetNextResult* response,
+                                           google::protobuf::Closure* done) override;
+
+    void execute_command(google::protobuf::RpcController* controller, const ExecuteCommandRequestPB* request,
+                         ExecuteCommandResultPB* response, google::protobuf::Closure* done) override;
 
 private:
     void _transmit_chunk(::google::protobuf::RpcController* controller,

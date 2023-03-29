@@ -33,6 +33,7 @@ import org.apache.logging.log4j.Logger;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -75,13 +76,24 @@ public class CacheUpdateProcessor {
         }
     }
 
-    public void refreshTable(String dbName, Table table) {
+    public void refreshTable(String dbName, Table table, boolean onlyCachedPartitions) {
         HiveMetaStoreTable hmsTbl = (HiveMetaStoreTable) table;
-        metastore.refreshTable(hmsTbl.getDbName(), hmsTbl.getTableName());
-        refreshRemoteFiles(hmsTbl.getTableLocation(), Operator.UPDATE, getExistPaths(hmsTbl));
+        metastore.refreshTable(hmsTbl.getDbName(), hmsTbl.getTableName(), onlyCachedPartitions);
+        refreshRemoteFiles(hmsTbl.getTableLocation(), Operator.UPDATE, getExistPaths(hmsTbl), onlyCachedPartitions);
         if (isResourceMappingCatalog(catalogName) && table.isHiveTable()) {
             processSchemaChange(dbName, (HiveTable) table);
         }
+    }
+
+    public void refreshTableWithExecutor(Table table, boolean onlyCachedPartitions, ExecutorService executor) {
+        HiveMetaStoreTable hmsTbl = (HiveMetaStoreTable) table;
+        metastore.refreshTable(hmsTbl.getDbName(), hmsTbl.getTableName(), onlyCachedPartitions);
+        refreshRemoteFiles(hmsTbl.getTableLocation(), Operator.UPDATE, getExistPaths(hmsTbl), onlyCachedPartitions,
+                executor);
+    }
+
+    public Set<HiveTableName> getCachedTableNames() {
+        return ((CachingHiveMetastore) metastore).getCachedTableNames();
     }
 
     private List<String> getExistPaths(HiveMetaStoreTable table) {
@@ -143,15 +155,30 @@ public class CacheUpdateProcessor {
         }
     }
 
-    private void refreshRemoteFiles(String tableLocation, Operator operator, List<String> existPaths) {
+    private void refreshRemoteFiles(String tableLocation, Operator operator, List<String> existPaths,
+                                    boolean onlyCachedPartitions) {
+        refreshRemoteFiles(tableLocation, operator, existPaths, onlyCachedPartitions, executor);
+    }
+
+
+    private void refreshRemoteFiles(String tableLocation, Operator operator, List<String> existPaths,
+                                    boolean onlyCachedPartitions, ExecutorService refreshExecutor) {
         if (remoteFileIO.isPresent()) {
-            List<RemotePathKey> presentPathKey = remoteFileIO.get().getPresentPathKeyInCache(tableLocation, isRecursive);
+            List<RemotePathKey> presentPathKey;
+            if (onlyCachedPartitions) {
+                presentPathKey = remoteFileIO.get().getPresentPathKeyInCache(tableLocation, isRecursive);
+            } else {
+                presentPathKey = existPaths.stream()
+                        .map(path -> RemotePathKey.of(path, isRecursive))
+                        .collect(Collectors.toList());
+            }
             List<Future<?>> futures = Lists.newArrayList();
             presentPathKey.forEach(pathKey -> {
-                if (operator == Operator.UPDATE && existPaths.contains(pathKey.getPath())) {
-                    futures.add(executor.submit(() -> remoteFileIO.get().updateRemoteFiles(pathKey)));
+                String pathWithSlash = pathKey.getPath().endsWith("/") ? pathKey.getPath() : pathKey.getPath() + "/";
+                if (operator == Operator.UPDATE && existPaths.contains(pathWithSlash)) {
+                    futures.add(refreshExecutor.submit(() -> remoteFileIO.get().updateRemoteFiles(pathKey)));
                 } else {
-                    futures.add(executor.submit(() -> remoteFileIO.get().invalidatePartition(pathKey)));
+                    futures.add(refreshExecutor.submit(() -> remoteFileIO.get().invalidatePartition(pathKey)));
                 }
             });
 
@@ -176,7 +203,7 @@ public class CacheUpdateProcessor {
 
     public void refreshTableByEvent(HiveTable updatedHiveTable, HiveCommonStats commonStats, Partition partition) {
         ((CachingHiveMetastore) metastore).refreshTableByEvent(updatedHiveTable, commonStats, partition);
-        refreshRemoteFiles(updatedHiveTable.getTableLocation(), Operator.UPDATE, getExistPaths(updatedHiveTable));
+        refreshRemoteFiles(updatedHiveTable.getTableLocation(), Operator.UPDATE, getExistPaths(updatedHiveTable), true);
     }
 
     public void refreshPartitionByEvent(HivePartitionName hivePartitionName, HiveCommonStats commonStats, Partition partion) {
@@ -209,7 +236,7 @@ public class CacheUpdateProcessor {
         metastore.invalidateTable(dbName, tableName);
 
         if (remoteFileIO.isPresent()) {
-            refreshRemoteFiles(tableLocation, Operator.DROP, Lists.newArrayList());
+            refreshRemoteFiles(tableLocation, Operator.DROP, Lists.newArrayList(), true);
         }
     }
 

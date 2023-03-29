@@ -37,9 +37,13 @@ package com.starrocks.metric;
 import com.codahale.metrics.Histogram;
 import com.codahale.metrics.MetricRegistry;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.starrocks.alter.Alter;
 import com.starrocks.alter.AlterJobV2;
+import com.starrocks.backup.AbstractJob;
+import com.starrocks.backup.BackupJob;
+import com.starrocks.backup.RestoreJob;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.TabletInvertedIndex;
@@ -63,7 +67,7 @@ import com.starrocks.proto.PKafkaOffsetProxyRequest;
 import com.starrocks.proto.PKafkaOffsetProxyResult;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.service.ExecuteEnv;
-import com.starrocks.system.Backend;
+import com.starrocks.system.DataNode;
 import com.starrocks.system.SystemInfoService;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -98,6 +102,9 @@ public final class MetricRepo {
     public static LongCounterMetric COUNTER_QUERY_QUEUE_PENDING;
     public static LongCounterMetric COUNTER_QUERY_QUEUE_TOTAL;
     public static LongCounterMetric COUNTER_QUERY_QUEUE_TIMEOUT;
+
+    public static LongCounterMetric COUNTER_UNFINISHED_BACKUP_JOB;
+    public static LongCounterMetric COUNTER_UNFINISHED_RESTORE_JOB;
 
     public static LongCounterMetric COUNTER_LOAD_ADD;
     public static LongCounterMetric COUNTER_LOAD_FINISHED;
@@ -399,6 +406,29 @@ public final class MetricRepo {
                 "total error rows of routine load");
         STARROCKS_METRIC_REGISTER.addMetric(COUNTER_ROUTINE_LOAD_ERROR_ROWS);
 
+        COUNTER_UNFINISHED_BACKUP_JOB = new LongCounterMetric("unfinished_backup_job", MetricUnit.REQUESTS,
+        "current unfinished backup job");
+        STARROCKS_METRIC_REGISTER.addMetric(COUNTER_UNFINISHED_BACKUP_JOB);
+        COUNTER_UNFINISHED_RESTORE_JOB = new LongCounterMetric("unfinished_restore_job", MetricUnit.REQUESTS,
+        "current unfinished restore job");
+        STARROCKS_METRIC_REGISTER.addMetric(COUNTER_UNFINISHED_RESTORE_JOB);
+        List<Database> dbs = Lists.newArrayList();
+        if (GlobalStateMgr.getCurrentState().getIdToDb() != null) {
+            for (Map.Entry<Long, Database> entry : GlobalStateMgr.getCurrentState().getIdToDb().entrySet()) {
+                dbs.add(entry.getValue());
+            }
+
+            for (Database db : dbs) {
+                AbstractJob jobI = GlobalStateMgr.getCurrentState().getBackupHandler().getJob(db.getId());
+                if (jobI instanceof BackupJob && !((BackupJob) jobI).isDone()) {
+                    COUNTER_UNFINISHED_BACKUP_JOB.increase(1L);
+                } else if (jobI instanceof RestoreJob && !((RestoreJob) jobI).isDone()) {
+                    COUNTER_UNFINISHED_RESTORE_JOB.increase(1L);
+                }
+
+            }
+        }
+
         // 3. histogram
         HISTO_QUERY_LATENCY = METRIC_REGISTER.histogram(MetricRegistry.name("query", "latency", "ms"));
         HISTO_EDIT_LOG_WRITE_LATENCY =
@@ -479,7 +509,7 @@ public final class MetricRepo {
         TabletInvertedIndex invertedIndex = GlobalStateMgr.getCurrentInvertedIndex();
 
         for (Long beId : infoService.getBackendIds(false)) {
-            Backend be = infoService.getBackend(beId);
+            DataNode be = infoService.getBackend(beId);
             if (be == null) {
                 continue;
             }
@@ -518,7 +548,9 @@ public final class MetricRepo {
 
     public static void updateRoutineLoadProcessMetrics() {
         List<RoutineLoadJob> jobs = GlobalStateMgr.getCurrentState().getRoutineLoadManager().getRoutineLoadJobByState(
-                Sets.newHashSet(RoutineLoadJob.JobState.NEED_SCHEDULE, RoutineLoadJob.JobState.RUNNING));
+                Sets.newHashSet(RoutineLoadJob.JobState.NEED_SCHEDULE,
+                                RoutineLoadJob.JobState.PAUSED,
+                                RoutineLoadJob.JobState.RUNNING));
 
         List<RoutineLoadJob> kafkaJobs = jobs.stream()
                 .filter(job -> (job instanceof KafkaRoutineLoadJob)

@@ -39,6 +39,7 @@ public:
     friend class HiveDataSource;
     HiveDataSourceProvider(ConnectorScanNode* scan_node, const TPlanNode& plan_node);
     DataSourcePtr create_data_source(const TScanRange& scan_range) override;
+    const TupleDescriptor* tuple_descriptor(RuntimeState* state) const override;
 
 protected:
     ConnectorScanNode* _scan_node;
@@ -65,12 +66,15 @@ private:
 
     // ============= init func =============
     Status _init_conjunct_ctxs(RuntimeState* state);
+    void _update_has_any_predicate();
     Status _decompose_conjunct_ctxs(RuntimeState* state);
     void _init_tuples_and_slots(RuntimeState* state);
     void _init_counter(RuntimeState* state);
 
     Status _init_partition_values();
     Status _init_scanner(RuntimeState* state);
+    HdfsScanner* _create_hudi_jni_scanner();
+    Status _check_all_slots_nullable();
 
     // =====================================
     ObjectPool _pool;

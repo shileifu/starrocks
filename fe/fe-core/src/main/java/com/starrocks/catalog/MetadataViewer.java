@@ -46,7 +46,7 @@ import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.AdminShowReplicaDistributionStmt;
 import com.starrocks.sql.ast.AdminShowReplicaStatusStmt;
 import com.starrocks.sql.ast.PartitionNames;
-import com.starrocks.system.Backend;
+import com.starrocks.system.DataNode;
 import com.starrocks.system.SystemInfoService;
 
 import java.text.DecimalFormat;
@@ -109,7 +109,7 @@ public class MetadataViewer {
                             List<String> row = Lists.newArrayList();
 
                             ReplicaStatus status = ReplicaStatus.OK;
-                            Backend be = infoService.getBackend(replica.getBackendId());
+                            DataNode be = infoService.getBackend(replica.getBackendId());
                             if (be == null || !be.isAvailable() || replica.isBad()) {
                                 status = ReplicaStatus.DEAD;
                             } else if (replica.getVersion() < visibleVersion
@@ -155,8 +155,8 @@ public class MetadataViewer {
                             row.add("-1");
                             row.add("-1");
                             row.add("-1");
-                            row.add(FeConstants.null_string);
-                            row.add(FeConstants.null_string);
+                            row.add(FeConstants.NULL_STRING);
+                            row.add(FeConstants.NULL_STRING);
                             row.add(ReplicaStatus.MISSING.name());
                             result.add(row);
                         }
@@ -203,8 +203,8 @@ public class MetadataViewer {
         db.readLock();
         try {
             Table tbl = db.getTable(tblName);
-            if (tbl == null || tbl.getType() != TableType.OLAP) {
-                throw new DdlException("Table does not exist or is not OLAP table: " + tblName);
+            if (tbl == null || !tbl.isNativeTable()) {
+                throw new DdlException("Table does not exist or is not native table: " + tblName);
             }
 
             OlapTable olapTable = (OlapTable) tbl;
@@ -238,11 +238,11 @@ public class MetadataViewer {
                 Partition partition = olapTable.getPartition(partId);
                 for (MaterializedIndex index : partition.getMaterializedIndices(IndexExtState.VISIBLE)) {
                     for (Tablet tablet : index.getTablets()) {
-                        for (Replica replica : ((LocalTablet) tablet).getImmutableReplicas()) {
-                            if (!countMap.containsKey(replica.getBackendId())) {
+                        for (long beId : tablet.getBackendIds()) {
+                            if (!countMap.containsKey(beId)) {
                                 continue;
                             }
-                            countMap.put(replica.getBackendId(), countMap.get(replica.getBackendId()) + 1);
+                            countMap.put(beId, countMap.get(beId) + 1);
                             totalReplicaNum++;
                         }
                     }

@@ -30,6 +30,7 @@ import com.starrocks.connector.RemotePathKey;
 import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.connector.hive.HiveRemoteFileIO;
 import com.starrocks.connector.hive.RemoteFileInputFormat;
+import com.starrocks.credential.azure.AzureCloudConfigurationFactory;
 import com.starrocks.thrift.TColumn;
 import com.starrocks.thrift.TFileTable;
 import com.starrocks.thrift.TTableDescriptor;
@@ -46,6 +47,7 @@ import java.util.Optional;
 public class FileTable extends Table {
     private static final String JSON_KEY_FILE_PATH = "path";
     private static final String JSON_KEY_FORMAT = "format";
+    private static final String JSON_RECURSIVE_DIRECTORIES = "enable_recursive_listing";
     private static final String JSON_KEY_FILE_PROPERTIES = "fileProperties";
     private Map<String, String> fileProperties = Maps.newHashMap();
     public FileTable() {
@@ -75,6 +77,8 @@ public class FileTable extends Table {
         if (!format.equalsIgnoreCase("parquet") && !format.equalsIgnoreCase("orc")) {
             throw new DdlException("not supported format: " + format);
         }
+        // Put path into fileProperties, so that we can get storage account in AzureStorageCloudConfiguration
+        fileProperties.put(AzureCloudConfigurationFactory.AZURE_PATH_KEY, path);
     }
 
     public String getTableLocation() {
@@ -99,7 +103,8 @@ public class FileTable extends Table {
         HdfsEnvironment hdfsEnvironment = new HdfsEnvironment(fileProperties, null);
         Configuration configuration = hdfsEnvironment.getConfiguration();
         HiveRemoteFileIO remoteFileIO = new HiveRemoteFileIO(configuration);
-        RemotePathKey pathKey = new RemotePathKey(getTableLocation(), false, Optional.empty());
+        boolean recursive = Boolean.parseBoolean(fileProperties.getOrDefault(JSON_RECURSIVE_DIRECTORIES, "false"));
+        RemotePathKey pathKey = new RemotePathKey(getTableLocation(), recursive, Optional.empty());
         try {
             Map<RemotePathKey, List<RemoteFileDesc>> result = remoteFileIO.getRemoteFiles(pathKey);
             if (result.isEmpty()) {

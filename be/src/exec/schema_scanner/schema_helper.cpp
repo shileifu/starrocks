@@ -47,6 +47,15 @@ Status SchemaHelper::list_table_status(const std::string& ip, const int32_t port
             [&request, &result](FrontendServiceConnection& client) { client->listTableStatus(*result, request); });
 }
 
+Status SchemaHelper::list_materialized_view_status(const std::string& ip, const int32_t port,
+                                                   const TGetTablesParams& request,
+                                                   TListMaterializedViewStatusResult* result) {
+    return ThriftRpcHelper::rpc<FrontendServiceClient>(ip, port,
+                                                       [&request, &result](FrontendServiceConnection& client) {
+                                                           client->listMaterializedViewStatus(*result, request);
+                                                       });
+}
+
 Status SchemaHelper::get_tables_info(const std::string& ip, const int32_t port, const TGetTablesInfoRequest& request,
                                      TGetTablesInfoResponse* response) {
     return ThriftRpcHelper::rpc<FrontendServiceClient>(
@@ -119,6 +128,25 @@ Status SchemaHelper::get_task_runs(const std::string& ip, const int32_t port, co
     return ThriftRpcHelper::rpc<FrontendServiceClient>(ip, port,
                                                        [&var_params, &var_result](FrontendServiceConnection& client) {
                                                            client->getTaskRuns(*var_result, var_params);
+                                                       });
+}
+
+Status SchemaHelper::get_loads(const std::string& ip, const int32_t port, const TGetLoadsParams& var_params,
+                               TGetLoadsResult* var_result, int timeout_ms) {
+    return ThriftRpcHelper::rpc<FrontendServiceClient>(
+            ip, port,
+            [&var_params, &var_result](FrontendServiceConnection& client) {
+                client->getLoads(*var_result, var_params);
+            },
+            timeout_ms);
+}
+
+Status SchemaHelper::get_tablet_schedules(const std::string& ip, const int32_t port,
+                                          const TGetTabletScheduleRequest& request,
+                                          TGetTabletScheduleResponse* response) {
+    return ThriftRpcHelper::rpc<FrontendServiceClient>(ip, port,
+                                                       [&request, &response](FrontendServiceConnection& client) {
+                                                           client->getTabletSchedule(*response, request);
                                                        });
 }
 

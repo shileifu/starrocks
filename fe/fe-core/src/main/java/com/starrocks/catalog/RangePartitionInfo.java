@@ -40,16 +40,18 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Range;
 import com.google.gson.annotations.SerializedName;
 import com.starrocks.common.AnalysisException;
+import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
-import com.starrocks.common.FeConstants;
 import com.starrocks.common.FeMetaVersion;
 import com.starrocks.common.util.RangeUtils;
 import com.starrocks.lake.StorageCacheInfo;
 import com.starrocks.persist.RangePartitionPersistInfo;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.RunMode;
 import com.starrocks.sql.ast.PartitionDesc;
 import com.starrocks.sql.ast.PartitionKeyDesc;
 import com.starrocks.sql.ast.SingleRangePartitionDesc;
+import com.starrocks.thrift.TStorageMedium;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -97,6 +99,14 @@ public class RangePartitionInfo extends PartitionInfo {
     public RangePartitionInfo(List<Column> partitionColumns) {
         super(PartitionType.RANGE);
         this.partitionColumns = partitionColumns;
+        this.isMultiColumnPartition = partitionColumns.size() > 1;
+    }
+
+    public RangePartitionInfo(RangePartitionInfo other) {
+        super(other.type);
+        this.partitionColumns = Lists.newArrayList(other.partitionColumns);
+        this.idToRange = Maps.newHashMap(other.idToRange);
+        this.idToTempRange = Maps.newHashMap(other.idToTempRange);
         this.isMultiColumnPartition = partitionColumns.size() > 1;
     }
 
@@ -220,18 +230,37 @@ public class RangePartitionInfo extends PartitionInfo {
         return range;
     }
 
-    public void handleNewRangePartitionDescs(List<PartitionDesc> partitionDescs,
-                                             List<Partition> partitionList, Set<String> existPartitionNameSet,
+    public Range<PartitionKey> createAutomaticShadowPartition(long partitionId, String replicateNum) throws DdlException {
+        Range<PartitionKey> range = null;
+        try {
+            PartitionKey shadowPartitionKey = PartitionKey.createShadowPartitionKey(partitionColumns);
+            range = Range.closedOpen(shadowPartitionKey, shadowPartitionKey);
+            setRangeInternal(partitionId, false, range);
+        } catch (IllegalArgumentException e) {
+            // Range.closedOpen may throw this if (lower > upper)
+            throw new DdlException("Invalid key range: " + e.getMessage());
+        } catch (AnalysisException e) {
+            throw new DdlException("Invalid key range: " + e.getMessage());
+        }
+        idToDataProperty.put(partitionId, new DataProperty(TStorageMedium.HDD));
+        idToReplicationNum.put(partitionId, Short.valueOf(replicateNum));
+        idToInMemory.put(partitionId, false);
+        idToStorageCacheInfo.put(partitionId, new StorageCacheInfo(true,
+                Config.lake_default_storage_cache_ttl_seconds, false));
+        return range;
+    }
+
+    public void handleNewRangePartitionDescs(Map<Partition, PartitionDesc> partitionMap,
+                                             Set<String> existPartitionNameSet,
                                              boolean isTemp) throws DdlException {
-        int len = partitionDescs.size();
-        for (int i = 0; i < len; i++) {
-            if (!existPartitionNameSet.contains(partitionList.get(i).getName())) {
-                long partitionId = partitionList.get(i).getId();
-                SingleRangePartitionDesc desc = (SingleRangePartitionDesc) partitionDescs.get(i);
+        for (Partition partition : partitionMap.keySet()) {
+            if (!existPartitionNameSet.contains(partition.getName())) {
+                long partitionId = partition.getId();
+                SingleRangePartitionDesc desc = (SingleRangePartitionDesc) partitionMap.get(partition);
                 Preconditions.checkArgument(desc.isAnalyzed());
                 Range<PartitionKey> range;
                 try {
-                    range = checkAndCreateRange((SingleRangePartitionDesc) partitionDescs.get(i), isTemp);
+                    range = checkAndCreateRange((SingleRangePartitionDesc) partitionMap.get(partition), isTemp);
                     setRangeInternal(partitionId, isTemp, range);
                 } catch (IllegalArgumentException e) {
                     // Range.closedOpen may throw this if (lower > upper)
@@ -391,13 +420,13 @@ public class RangePartitionInfo extends PartitionInfo {
 
     @Override
     public void gsonPreProcess() throws IOException {
-        serializedIdToRange = Maps.newHashMap();
+        serializedIdToRange = Maps.newConcurrentMap();
         for (Map.Entry<Long, Range<PartitionKey>> entry : idToRange.entrySet()) {
             byte[] serializedRange = serializeRange(entry.getValue());
             serializedIdToRange.put(entry.getKey(), serializedRange);
         }
 
-        serializedIdToTempRange = Maps.newHashMap();
+        serializedIdToTempRange = Maps.newConcurrentMap();
         for (Map.Entry<Long, Range<PartitionKey>> entry : idToTempRange.entrySet()) {
             byte[] serializedRange = serializeRange(entry.getValue());
             serializedIdToTempRange.put(entry.getKey(), serializedRange);
@@ -406,14 +435,14 @@ public class RangePartitionInfo extends PartitionInfo {
 
     @Override
     public void gsonPostProcess() throws IOException {
-        idToRange = Maps.newHashMap();
+        idToRange = Maps.newConcurrentMap();
         if (serializedIdToRange != null && !serializedIdToRange.isEmpty()) {
             for (Map.Entry<Long, byte[]> entry : serializedIdToRange.entrySet()) {
                 idToRange.put(entry.getKey(), deserializeRange(entry.getValue()));
             }
             serializedIdToRange = null;
         }
-        idToTempRange = Maps.newHashMap();
+        idToTempRange = Maps.newConcurrentMap();
         if (serializedIdToTempRange != null && !serializedIdToTempRange.isEmpty()) {
             for (Map.Entry<Long, byte[]> entry : serializedIdToTempRange.entrySet()) {
                 idToTempRange.put(entry.getKey(), deserializeRange(entry.getValue()));
@@ -498,7 +527,7 @@ public class RangePartitionInfo extends PartitionInfo {
         String replicationNumStr = table.getTableProperty().getProperties().get("replication_num");
         short replicationNum;
         if (replicationNumStr == null) {
-            replicationNum = FeConstants.default_replication_num;
+            replicationNum = RunMode.defaultReplicationNum();
         } else {
             replicationNum = Short.parseShort(replicationNumStr);
         }

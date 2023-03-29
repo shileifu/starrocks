@@ -27,7 +27,7 @@ import com.starrocks.catalog.Tablet;
 import com.starrocks.catalog.TabletInvertedIndex;
 import com.starrocks.catalog.TabletMeta;
 import com.starrocks.server.GlobalStateMgr;
-import com.starrocks.system.Backend;
+import com.starrocks.system.DataNode;
 import com.starrocks.task.AgentBatchTask;
 import com.starrocks.task.AgentTaskExecutor;
 import com.starrocks.task.ClearTransactionTask;
@@ -46,6 +46,7 @@ public class OlapTableTxnStateListener implements TransactionStateListener {
     private static final List<ClearTransactionTask> CLEAR_TRANSACTION_TASKS = Lists.newArrayList();
 
     private final DatabaseTransactionMgr dbTxnMgr;
+    // olap table or olap materialized view
     private final OlapTable table;
 
     private Set<Long> totalInvolvedBackends;
@@ -123,7 +124,7 @@ public class OlapTableTxnStateListener implements TransactionStateListener {
         // use for selection of primary replica for replicated storage
         for (TabletFailInfo failedTablet : failedTablets) {
             if (failedTablet.getTabletId() == -1) {
-                Backend backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(failedTablet.getBackendId());
+                DataNode backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(failedTablet.getBackendId());
                 if (backend != null) {
                     backend.setLastWriteFail(true);
                 }
@@ -136,7 +137,7 @@ public class OlapTableTxnStateListener implements TransactionStateListener {
         }
 
         for (Long committedBackend : allCommittedBackends) {
-            Backend backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(committedBackend);
+            DataNode backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(committedBackend);
             if (backend != null) {
                 backend.setLastWriteFail(false);
             }
@@ -164,7 +165,7 @@ public class OlapTableTxnStateListener implements TransactionStateListener {
                     for (long tabletBackend : tabletBackends) {
                         Replica replica = tabletInvertedIndex.getReplica(tabletId, tabletBackend);
                         if (replica == null) {
-                            Backend backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(tabletBackend);
+                            DataNode backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(tabletBackend);
                             throw new TransactionCommitFailedException("Not found replicas of tablet. "
                                     + "tablet_id: " + tabletId + ", backend_id: " + backend.getHost());
                         }
@@ -178,14 +179,14 @@ public class OlapTableTxnStateListener implements TransactionStateListener {
                             if (lfv < 0) {
                                 ++successReplicaNum;
                             } else {
-                                Backend backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(tabletBackend);
+                                DataNode backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(tabletBackend);
                                 failedReplicaInfoSB.append(
                                         String.format("%d:{be:%d %s V:%d LFV:%d},", replica.getId(), tabletBackend,
                                                 backend == null ? "" : backend.getHost(), replica.getVersion(), lfv));
                             }
                             replica.setLastWriteFail(false);
                         } else {
-                            Backend backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(tabletBackend);
+                            DataNode backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(tabletBackend);
                             failedReplicaInfoSB.append(
                                     String.format("%d:{be:%d %s V:%d LFV:%d},", replica.getId(), tabletBackend,
                                             backend == null ? "" : backend.getHost(), replica.getVersion(),
@@ -199,9 +200,12 @@ public class OlapTableTxnStateListener implements TransactionStateListener {
                     }
 
                     if (successReplicaNum < quorumReplicaNum) {
-                        String msg = String.format("Commit failed. txn: %d table: %s tablet: %d quorum: %d<%d errorReplicas: %s",
-                                txnState.getTransactionId(), table.getName(), tablet.getId(), successReplicaNum, quorumReplicaNum,
-                                failedReplicaInfoSB.toString());
+                        String msg = String.format(
+                                "Commit failed. txn: %d table: %s tablet: %d quorum: %d<%d errorReplicas: %s commitBackends: %s",
+                                txnState.getTransactionId(), table.getName(), tablet.getId(), successReplicaNum,
+                                quorumReplicaNum,
+                                failedReplicaInfoSB.toString(),
+                                commitBackends == null ? "" : commitBackends.toString());
                         LOG.warn(msg);
                         throw new TabletQuorumFailedException(msg);
                     }
@@ -260,9 +264,9 @@ public class OlapTableTxnStateListener implements TransactionStateListener {
                 // update write failed backend/replica
                 // use for selection of primary replica for replicated storage
                 for (TabletFailInfo failedTablet : failedTablets) {
-                    LOG.info(failedTablet);
+                    LOG.debug("failed tablet ", failedTablet);
                     if (failedTablet.getTabletId() == -1) {
-                        Backend backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(failedTablet.getBackendId());
+                        DataNode backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(failedTablet.getBackendId());
                         if (backend != null) {
                             backend.setLastWriteFail(true);
                         }
@@ -275,7 +279,7 @@ public class OlapTableTxnStateListener implements TransactionStateListener {
                     }
                 }
             } catch (Exception e) {
-                LOG.warn(e);
+                LOG.warn("Fail to execute postAbort", e);
             } finally {
                 db.readUnlock();
             }

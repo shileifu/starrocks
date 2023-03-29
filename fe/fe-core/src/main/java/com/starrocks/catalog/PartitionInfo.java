@@ -84,7 +84,7 @@ public class PartitionInfo implements Writable, GsonPreProcessable, GsonPostProc
     protected Map<Long, TTabletType> idToTabletType;
 
     // for lake table
-    // storage cache, ttl and allow_async_write_back
+    // storage cache, ttl and enable_async_write_back
     @SerializedName(value = "idToStorageCacheInfo")
     protected Map<Long, StorageCacheInfo> idToStorageCacheInfo;
 
@@ -108,6 +108,10 @@ public class PartitionInfo implements Writable, GsonPreProcessable, GsonPostProc
 
     public PartitionType getType() {
         return type;
+    }
+
+    public boolean isRangePartition() {
+        return type == PartitionType.RANGE || type == PartitionType.EXPR_RANGE;
     }
 
     public DataProperty getDataProperty(long partitionId) {
@@ -174,6 +178,9 @@ public class PartitionInfo implements Writable, GsonPreProcessable, GsonPostProc
         idToDataProperty.remove(partitionId);
         idToReplicationNum.remove(partitionId);
         idToInMemory.remove(partitionId);
+    }
+
+    public void moveRangeFromTempToFormal(long tempPartitionId) {
     }
 
     public void addPartition(long partitionId, DataProperty dataProperty,

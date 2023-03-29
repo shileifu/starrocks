@@ -37,6 +37,10 @@ DataSourcePtr FileDataSourceProvider::create_data_source(const TScanRange& scan_
     return std::make_unique<FileDataSource>(this, scan_range);
 }
 
+const TupleDescriptor* FileDataSourceProvider::tuple_descriptor(RuntimeState* state) const {
+    return state->desc_tbl().get_tuple_descriptor(_file_scan_node.tuple_id);
+}
+
 // ================================
 FileDataSource::FileDataSource(const FileDataSourceProvider* provider, const TScanRange& scan_range)
         : _provider(provider), _scan_range(scan_range.broker_scan_range) {
@@ -73,6 +77,10 @@ Status FileDataSource::_create_scanner() {
     } else if (_scan_range.ranges[0].format_type == TFileFormatType::FORMAT_PARQUET) {
         _scanner = std::make_unique<ParquetScanner>(_runtime_state, _runtime_profile, _scan_range, &_counter);
     } else if (_scan_range.ranges[0].format_type == TFileFormatType::FORMAT_JSON) {
+        _scanner = std::make_unique<JsonScanner>(_runtime_state, _runtime_profile, _scan_range, &_counter);
+    } else if (_scan_range.ranges[0].format_type == TFileFormatType::FORMAT_AVRO) {
+        // TODO(yangzaorang): we use json as an intermediate format to parse avro format, but there are
+        // performance issues here, and we could directly parse avro format data later.
         _scanner = std::make_unique<JsonScanner>(_runtime_state, _runtime_profile, _scan_range, &_counter);
     } else {
         _scanner = std::make_unique<CSVScanner>(_runtime_state, _runtime_profile, _scan_range, &_counter);

@@ -77,6 +77,8 @@ namespace pipeline {
 class QueryContext;
 }
 
+constexpr int64_t kRpcHttpMinSize = ((1L << 31) - (1L << 10));
+
 // A collection of items that are part of the global state of a
 // query and shared across all execution nodes of that query.
 class RuntimeState {
@@ -283,13 +285,20 @@ public:
 
     int num_per_fragment_instances() const { return _num_per_fragment_instances; }
 
-    int64_t min_reservation() const { return _query_options.min_reservation; }
+    TSpillMode::type spill_mode() const {
+        DCHECK(_query_options.__isset.spill_mode);
+        return _query_options.spill_mode;
+    }
 
-    int64_t max_reservation() const { return _query_options.max_reservation; }
+    bool enable_spill() const { return _query_options.enable_spill; }
 
-    bool disable_stream_preaggregations() const { return _query_options.disable_stream_preaggregations; }
+    int32_t spill_mem_table_size() const { return _query_options.spill_mem_table_size; }
 
-    bool enable_spill() const { return _query_options.enable_spilling; }
+    int32_t spill_mem_table_num() const { return _query_options.spill_mem_table_num; }
+
+    double spill_mem_limit_threshold() const { return _query_options.spill_mem_limit_threshold; }
+
+    int64_t spill_operator_min_bytes() const { return _query_options.spill_operator_min_bytes; }
 
     const std::vector<TTabletCommitInfo>& tablet_commit_infos() const { return _tablet_commit_infos; }
 
@@ -308,6 +317,16 @@ public:
     void append_tablet_fail_infos(const TTabletFailInfo& fail_info) {
         std::lock_guard<std::mutex> l(_tablet_infos_lock);
         _tablet_fail_infos.emplace_back(std::move(fail_info));
+    }
+
+    std::vector<TIcebergDataFile>& iceberg_commit_infos() {
+        std::lock_guard<std::mutex> l(_iceberg_info_lock);
+        return _iceberg_sink_commit_infos;
+    }
+
+    void add_iceberg_data_file(const TIcebergDataFile& file) {
+        std::lock_guard<std::mutex> l(_iceberg_info_lock);
+        _iceberg_sink_commit_infos.emplace_back(std::move(file));
     }
 
     // get mem limit for load channel
@@ -335,6 +354,10 @@ public:
     std::shared_ptr<QueryStatisticsRecvr> query_recv();
 
     Status reset_epoch();
+
+    int64_t get_rpc_http_min_size() {
+        return _query_options.__isset.rpc_http_min_size ? _query_options.rpc_http_min_size : kRpcHttpMinSize;
+    }
 
 private:
     // Set per-query state.
@@ -441,6 +464,9 @@ private:
     std::vector<TTabletCommitInfo> _tablet_commit_infos;
     std::vector<TTabletFailInfo> _tablet_fail_infos;
 
+    std::mutex _iceberg_info_lock;
+    std::vector<TIcebergDataFile> _iceberg_sink_commit_infos;
+
     // prohibit copies
     RuntimeState(const RuntimeState&) = delete;
 
@@ -469,7 +495,7 @@ private:
             break;                                                                                                  \
         case MemTracker::QUERY:                                                                                     \
             str << "Mem usage has exceed the limit of single query, You can change the limit by "                   \
-                   "set session variable exec_mem_limit or query_mem_limit.";                                       \
+                   "set session variable query_mem_limit.";                                                         \
             break;                                                                                                  \
         case MemTracker::PROCESS:                                                                                   \
             str << "Mem usage has exceed the limit of BE";                                                          \

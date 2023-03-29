@@ -58,6 +58,7 @@
 #include "gen_cpp/MVMaintenance_types.h"
 #include "gutil/strings/substitute.h"
 #include "runtime/buffer_control_block.h"
+#include "runtime/command_executor.h"
 #include "runtime/data_stream_mgr.h"
 #include "runtime/exec_env.h"
 #include "runtime/fragment_mgr.h"
@@ -134,8 +135,16 @@ void PInternalServiceImplBase<T>::_transmit_chunk(google::protobuf::RpcControlle
                                                   const PTransmitChunkParams* request, PTransmitChunkResult* response,
                                                   google::protobuf::Closure* done) {
     auto begin_ts = MonotonicNanos();
-    VLOG_ROW << "transmit data: " << (uint64_t)(request) << " fragment_instance_id=" << print_id(request->finst_id())
-             << " node=" << request->node_id() << " begin";
+    std::string transmit_info = "";
+    auto gen_transmit_info = [&transmit_info, &request]() {
+        transmit_info = "transmit data: " + std::to_string((uint64_t)(request)) +
+                        " fragment_instance_id=" + print_id(request->finst_id()) +
+                        " node=" + std::to_string(request->node_id());
+    };
+    if (VLOG_ROW_IS_ON) {
+        gen_transmit_info();
+    }
+    VLOG_ROW << transmit_info << " begin";
     // NOTE: we should give a default value to response to avoid concurrent risk
     // If we don't give response here, stream manager will call done->Run before
     // transmit_data(), which will cause a dirty memory access.
@@ -143,29 +152,85 @@ void PInternalServiceImplBase<T>::_transmit_chunk(google::protobuf::RpcControlle
     auto* req = const_cast<PTransmitChunkParams*>(request);
     const auto receive_timestamp = GetCurrentTimeNanos();
     response->set_receive_timestamp(receive_timestamp);
-    if (cntl->request_attachment().size() > 0) {
-        const butil::IOBuf& io_buf = cntl->request_attachment();
-        size_t offset = 0;
-        for (size_t i = 0; i < req->chunks().size(); ++i) {
-            auto chunk = req->mutable_chunks(i);
-            io_buf.copy_to(chunk->mutable_data(), chunk->data_size(), offset);
-            offset += chunk->data_size();
-        }
-    }
     Status st;
     st.to_protobuf(response->mutable_status());
-    TRY_CATCH_ALL(st, _exec_env->stream_mgr()->transmit_chunk(*request, &done));
-    if (!st.ok()) {
-        LOG(WARNING) << "transmit_data failed, message=" << st.get_error_msg()
-                     << ", fragment_instance_id=" << print_id(request->finst_id()) << ", node=" << request->node_id();
+    DeferOp defer([&]() {
+        if (!st.ok()) {
+            gen_transmit_info();
+            LOG(WARNING) << "failed to " << transmit_info;
+        }
+        if (done != nullptr) {
+            // NOTE: only when done is not null, we can set response status
+            st.to_protobuf(response->mutable_status());
+            done->Run();
+        }
+        VLOG_ROW << transmit_info << " cost time = " << MonotonicNanos() - begin_ts;
+    });
+    if (cntl->request_attachment().size() > 0) {
+        butil::IOBuf& io_buf = cntl->request_attachment();
+        for (size_t i = 0; i < req->chunks().size(); ++i) {
+            auto chunk = req->mutable_chunks(i);
+            if (UNLIKELY(io_buf.size() < chunk->data_size())) {
+                auto msg = fmt::format("iobuf's size {} < {}", io_buf.size(), chunk->data_size());
+                LOG(WARNING) << msg;
+                st = Status::InternalError(msg);
+                return;
+            }
+            // also with copying due to the discontinuous memory in chunk
+            auto size = io_buf.cutn(chunk->mutable_data(), chunk->data_size());
+            if (UNLIKELY(size != chunk->data_size())) {
+                auto msg = fmt::format("iobuf read {} != expected {}.", size, chunk->data_size());
+                LOG(WARNING) << msg;
+                st = Status::InternalError(msg);
+                return;
+            }
+        }
     }
-    if (done != nullptr) {
-        // NOTE: only when done is not null, we can set response status
-        st.to_protobuf(response->mutable_status());
-        done->Run();
+
+    st = _exec_env->stream_mgr()->transmit_chunk(*request, &done);
+}
+
+template <typename T>
+void PInternalServiceImplBase<T>::transmit_chunk_via_http(google::protobuf::RpcController* cntl_base,
+                                                          const PHttpRequest* request, PTransmitChunkResult* response,
+                                                          google::protobuf::Closure* done) {
+    auto task = [=]() {
+        auto params = std::make_shared<PTransmitChunkParams>();
+        auto get_params = [&]() -> Status {
+            auto* cntl = static_cast<brpc::Controller*>(cntl_base);
+            butil::IOBuf& iobuf = cntl->request_attachment();
+            // deserialize PTransmitChunkParams
+            size_t params_size = 0;
+            iobuf.cutn(&params_size, sizeof(params_size));
+            butil::IOBuf params_from;
+            iobuf.cutn(&params_from, params_size);
+            butil::IOBufAsZeroCopyInputStream wrapper(params_from);
+            params->ParseFromZeroCopyStream(&wrapper);
+            // the left size is from chunks' data
+            size_t attachment_size = 0;
+            iobuf.cutn(&attachment_size, sizeof(attachment_size));
+            if (attachment_size != iobuf.size()) {
+                Status st = Status::InternalError(
+                        fmt::format("{} != {} during deserialization via http", attachment_size, iobuf.size()));
+                return st;
+            }
+            return Status::OK();
+        };
+        // may throw std::bad_alloc exception.
+        Status st = get_params();
+        if (!st.ok()) {
+            st.to_protobuf(response->mutable_status());
+            done->Run();
+            LOG(WARNING) << "transmit_data via http rpc failed, message=" << st.get_error_msg();
+            return;
+        }
+        this->_transmit_chunk(cntl_base, params.get(), response, done);
+    };
+    if (!_exec_env->query_rpc_pool()->try_offer(std::move(task))) {
+        ClosureGuard closure_guard(done);
+        Status::ServiceUnavailable("submit transmit_chunk_via_http task failed")
+                .to_protobuf(response->mutable_status());
     }
-    VLOG_ROW << "transmit data: " << (uint64_t)(request) << " fragment_instance_id=" << print_id(request->finst_id())
-             << " node=" << request->node_id() << " cost time = " << MonotonicNanos() - begin_ts;
 }
 
 template <typename T>
@@ -843,9 +908,66 @@ Status PInternalServiceImplBase<T>::_mv_commit_epoch(const pipeline::QueryContex
     publish_version_req.partition_version_infos = commit_epoch_task.partition_version_infos;
     publish_version_req.transaction_id = commit_epoch_task.transaction_id;
 
-    run_publish_version_task(token.get(), publish_version_req, finish_task_request, affected_dirs);
+    run_publish_version_task(token.get(), publish_version_req, finish_task_request, affected_dirs, 0);
     StorageEngine::instance()->txn_manager()->flush_dirs(affected_dirs);
     return Status::OK();
+}
+
+template <typename T>
+void PInternalServiceImplBase<T>::local_tablet_reader_open(google::protobuf::RpcController* controller,
+                                                           const PTabletReaderOpenRequest* request,
+                                                           PTabletReaderOpenResult* response,
+                                                           google::protobuf::Closure* done) {
+    ClosureGuard closure_guard(done);
+    response->mutable_status()->set_status_code(TStatusCode::NOT_IMPLEMENTED_ERROR);
+}
+
+template <typename T>
+void PInternalServiceImplBase<T>::local_tablet_reader_close(google::protobuf::RpcController* controller,
+                                                            const PTabletReaderCloseRequest* request,
+                                                            PTabletReaderCloseResult* response,
+                                                            google::protobuf::Closure* done) {
+    ClosureGuard closure_guard(done);
+    response->mutable_status()->set_status_code(TStatusCode::NOT_IMPLEMENTED_ERROR);
+}
+
+template <typename T>
+void PInternalServiceImplBase<T>::local_tablet_reader_multi_get(google::protobuf::RpcController* controller,
+                                                                const PTabletReaderMultiGetRequest* request,
+                                                                PTabletReaderMultiGetResult* response,
+                                                                google::protobuf::Closure* done) {
+    ClosureGuard closure_guard(done);
+    response->mutable_status()->set_status_code(TStatusCode::NOT_IMPLEMENTED_ERROR);
+}
+
+template <typename T>
+void PInternalServiceImplBase<T>::local_tablet_reader_scan_open(google::protobuf::RpcController* controller,
+                                                                const PTabletReaderScanOpenRequest* request,
+                                                                PTabletReaderScanOpenResult* response,
+                                                                google::protobuf::Closure* done) {
+    ClosureGuard closure_guard(done);
+    response->mutable_status()->set_status_code(TStatusCode::NOT_IMPLEMENTED_ERROR);
+}
+
+template <typename T>
+void PInternalServiceImplBase<T>::local_tablet_reader_scan_get_next(google::protobuf::RpcController* controller,
+                                                                    const PTabletReaderScanGetNextRequest* request,
+                                                                    PTabletReaderScanGetNextResult* response,
+                                                                    google::protobuf::Closure* done) {
+    ClosureGuard closure_guard(done);
+    response->mutable_status()->set_status_code(TStatusCode::NOT_IMPLEMENTED_ERROR);
+}
+
+template <typename T>
+void PInternalServiceImplBase<T>::execute_command(google::protobuf::RpcController* controller,
+                                                  const ExecuteCommandRequestPB* request,
+                                                  ExecuteCommandResultPB* response, google::protobuf::Closure* done) {
+    ClosureGuard closure_guard(done);
+    Status st = starrocks::execute_command(request->command(), request->params());
+    if (!st.ok()) {
+        LOG(WARNING) << "execute_command failed, errmsg=" << st.to_string();
+    }
+    st.to_protobuf(response->mutable_status());
 }
 
 template class PInternalServiceImplBase<PInternalService>;

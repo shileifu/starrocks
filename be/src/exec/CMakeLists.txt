@@ -38,7 +38,6 @@ set(EXEC_FILES
     es/es_query_builder.cpp
     es/es_scroll_parser.cpp
     local_file_writer.cpp
-    broker_writer.cpp
     plain_text_builder.cpp
     aggregator.cpp
     sorted_streaming_aggregator.cpp
@@ -49,6 +48,7 @@ set(EXEC_FILES
     aggregate/aggregate_streaming_node.cpp
     aggregate/distinct_streaming_node.cpp
     partition/chunks_partitioner.cpp
+    partition/partition_hash_variant.cpp
     analytic_node.cpp
     analytor.cpp
     csv_scanner.cpp
@@ -62,12 +62,14 @@ set(EXEC_FILES
     lake_meta_scan_node.cpp
     hash_joiner.cpp
     hash_join_node.cpp
+    hash_join_components.cpp
     join_hash_map.cpp
     topn_node.cpp
     chunks_sorter.cpp
     chunks_sorter_heap_sort.cpp
     chunks_sorter_topn.cpp
     chunks_sorter_full_sort.cpp
+    spillable_chunks_sorter_full_sort.cpp
     cross_join_node.cpp
     union_node.cpp
     except_hash_set.cpp
@@ -79,6 +81,8 @@ set(EXEC_FILES
     arrow_to_json_converter.cpp
     parquet_scanner.cpp
     parquet_reader.cpp
+    parquet_writer.cpp
+    parquet_builder.cpp
     file_scan_node.cpp
     assert_num_rows_node.cpp
     intersect_hash_set.cpp
@@ -110,10 +114,18 @@ set(EXEC_FILES
     schema_scanner/schema_materialized_views_scanner.cpp
     schema_scanner/schema_tasks_scanner.cpp
     schema_scanner/schema_task_runs_scanner.cpp
+    schema_scanner/schema_loads_scanner.cpp
+    schema_scanner/schema_load_tracking_logs_scanner.cpp
     schema_scanner/schema_user_privileges_scanner.cpp
     schema_scanner/schema_schema_privileges_scanner.cpp
     schema_scanner/schema_table_privileges_scanner.cpp
     schema_scanner/schema_tables_config_scanner.cpp
+    schema_scanner/schema_be_metrics_scanner.cpp
+    schema_scanner/schema_be_tablets_scanner.cpp
+    schema_scanner/schema_be_txns_scanner.cpp
+    schema_scanner/schema_be_configs_scanner.cpp
+    schema_scanner/schema_be_threads_scanner.cpp
+    schema_scanner/schema_fe_tablet_schedules_scanner.cpp
     schema_scanner/schema_helper.cpp
     jdbc_scanner.cpp
     sorting/compare_column.cpp
@@ -132,6 +144,7 @@ set(EXEC_FILES
     pipeline/exchange/sink_buffer.cpp
     pipeline/fragment_executor.cpp
     pipeline/operator.cpp
+    pipeline/source_operator.cpp
     pipeline/limit_operator.cpp
     pipeline/pipeline_builder.cpp
     pipeline/project_operator.cpp
@@ -171,6 +184,7 @@ set(EXEC_FILES
     pipeline/sort/local_partition_topn_source.cpp
     pipeline/sort/local_partition_topn_context.cpp
     pipeline/sort/local_merge_sort_source_operator.cpp
+    pipeline/sort/spillable_partition_sort_sink_operator.cpp
     pipeline/sort/sort_context.cpp
     pipeline/pipeline_driver_executor.cpp
     pipeline/pipeline_driver_queue.cpp
@@ -192,6 +206,8 @@ set(EXEC_FILES
     pipeline/aggregate/aggregate_distinct_streaming_source_operator.cpp
     pipeline/aggregate/sorted_aggregate_streaming_sink_operator.cpp
     pipeline/aggregate/sorted_aggregate_streaming_source_operator.cpp
+    pipeline/aggregate/spillable_aggregate_blocking_sink_operator.cpp
+    pipeline/aggregate/spillable_aggregate_blocking_source_operator.cpp
     pipeline/aggregate/repeat/repeat_operator.cpp
     pipeline/analysis/analytic_sink_operator.cpp
     pipeline/analysis/analytic_source_operator.cpp
@@ -210,8 +226,18 @@ set(EXEC_FILES
     pipeline/set/intersect_build_sink_operator.cpp
     pipeline/set/intersect_probe_sink_operator.cpp
     pipeline/set/intersect_output_source_operator.cpp
+    pipeline/hash_partition_context.cpp
+    pipeline/hash_partition_sink_operator.cpp
+    pipeline/hash_partition_source_operator.cpp
+    pipeline/adaptive/collect_stats_sink_operator.cpp
+    pipeline/adaptive/collect_stats_source_operator.cpp
+    pipeline/adaptive/collect_stats_context.cpp
+    pipeline/adaptive/lazy_instantiate_drivers_operator.cpp
+    pipeline/adaptive/utils.cpp
     pipeline/chunk_accumulate_operator.cpp
     pipeline/pipeline.cpp
+    pipeline/spill_process_operator.cpp
+    pipeline/spill_process_channel.cpp
     workgroup/work_group.cpp
     workgroup/scan_executor.cpp
     workgroup/scan_task_queue.cpp
@@ -221,18 +247,20 @@ set(EXEC_FILES
     query_cache/lane_arbiter.cpp
     query_cache/conjugate_operator.cpp
     query_cache/ticket_checker.cpp
+    spill/spiller.cpp
+    spill/spiller_factory.cpp
+    spill/spill_components.cpp
+    spill/mem_table.cpp
+    spill/dir_manager.cpp
+    spill/serde.cpp
+    spill/input_stream.cpp
+    spill/log_block_manager.cpp
     stream/state/mem_state_table.cpp
     stream/aggregate/agg_state_data.cpp
+    stream/aggregate/agg_group_state.cpp
     stream/aggregate/stream_aggregator.cpp
     stream/aggregate/stream_aggregate_operator.cpp
     stream/stream_aggregate_node.cpp)
-
-# simdjson Runtime Implement Dispatch: https://github.com/simdjson/simdjson/blob/master/doc/implementation-selection.md#runtime-cpu-detection
-# Unset architecture-specific flags to avoid breaking implement runtime dispatch.
-if ("${CMAKE_BUILD_TARGET_ARCH}" STREQUAL "x86" OR "${CMAKE_BUILD_TARGET_ARCH}" STREQUAL "x86_64")
-    set_source_files_properties(json_scanner.cpp PROPERTIES COMPILE_FLAGS "-mno-avx -mno-avx2")
-    set_source_files_properties(json_parser.cpp PROPERTIES COMPILE_FLAGS "-mno-avx -mno-avx2")
-endif()
 
 add_library(Exec STATIC
     ${EXEC_FILES}

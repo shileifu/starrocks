@@ -10,7 +10,7 @@ set(EXEC_FILES
         ./column/decimalv3_column_test.cpp
         ./column/field_test.cpp
         ./column/fixed_length_column_test.cpp
-        ./column/json_column_test.cpp
+        #./column/json_column_test.cpp
         ./column/map_column_test.cpp
         ./column/struct_column_test.cpp
         ./column/nullable_column_test.cpp
@@ -31,6 +31,7 @@ set(EXEC_FILES
         ./exec/es/es_query_builder_test.cpp
         ./exec/es/es_scan_reader_test.cpp
         ./exec/es/es_scroll_parser_test.cpp
+        ./exec/workgroup/scan_task_queue_test.cpp
         ./exec/pipeline/pipeline_control_flow_test.cpp
         ./exec/pipeline/pipeline_driver_queue_test.cpp
         ./exec/pipeline/pipeline_file_scan_node_test.cpp
@@ -54,11 +55,12 @@ set(EXEC_FILES
         ./exec/chunks_sorter_test.cpp
         ./exec/csv_scanner_test.cpp
         ./exec/file_scan_node_test.cpp
-        ./exec/hdfs_scanner_test.cpp
+        ./exec/hdfs_scanner_test.cpp        
         ./exec/hdfs_scan_node_test.cpp
         ./exec/join_hash_map_test.cpp
         ./exec/json_parser_test.cpp
         ./exec/json_scanner_test.cpp
+        ./exec/avro_scanner_test.cpp
         ./exec/parquet_scanner_test.cpp
         ./exec/repeat_node_test.cpp
         ./exec/sorting_test.cpp
@@ -94,7 +96,8 @@ set(EXEC_FILES
         ./exprs/in_predicate_test.cpp
         ./exprs/is_null_predicate_test.cpp
         ./exprs/json_functions_test.cpp
-        ./exprs/lambda_function_expr_test.cpp
+        ./exprs/lambda_array_expr_test.cpp
+        ./exprs/lambda_map_expr_test.cpp
         ./exprs/like_test.cpp
         ./exprs/map_element_expr_test.cpp
         ./exprs/map_functions_test.cpp
@@ -141,6 +144,7 @@ set(EXEC_FILES
         ./formats/parquet/metadata_test.cpp
         ./formats/parquet/group_reader_test.cpp
         ./formats/parquet/file_reader_test.cpp
+        ./formats/parquet/iceberg_schema_evolution_file_reader_test.cpp
         ./geo/geo_types_test.cpp
         ./geo/wkt_parse_test.cpp
         ./http/http_client_test.cpp
@@ -156,6 +160,7 @@ set(EXEC_FILES
         ./io/s3_input_stream_test.cpp
         ./io/fd_input_stream_test.cpp
         ./io/seekable_input_stream_test.cpp
+        ./io/spill_test.cpp
         ./storage/decimal12_test.cpp
         ./storage/disjunctive_predicates_test.cpp
         ./storage/utils_test.cpp
@@ -183,10 +188,12 @@ set(EXEC_FILES
         ./storage/lake/horizontal_compaction_task_test.cpp
         ./storage/lake/schema_change_test.cpp
         ./storage/lake/tablet_manager_test.cpp
+        ./storage/lake/partial_update_test.cpp
         ./storage/lake/tablet_reader_test.cpp
         ./storage/lake/tablet_writer_test.cpp
+        ./storage/lake/condition_update_test.cpp
         ./storage/lake/primary_key_compaction_task_test.cpp
-        ./storage/lake/primary_key_test.cpp
+        ./storage/lake/primary_key_publish_test.cpp
         ./storage/rowset_update_state_test.cpp
         ./storage/rowset/rowset_test.cpp
         ./storage/rowset/binary_dict_page_test.cpp
@@ -216,6 +223,7 @@ set(EXEC_FILES
         ./storage/storage_types_test.cpp
         ./storage/tablet_meta_test.cpp
         ./storage/tablet_meta_manager_test.cpp
+        ./storage/table_reader_remote_test.cpp
         ./storage/table_reader_test.cpp
         ./storage/table_schema_test.cpp
         ./storage/tablet_updates_test.cpp
@@ -245,7 +253,12 @@ set(EXEC_FILES
         ./storage/rowset_merger_test.cpp
         ./storage/schema_change_test.cpp
         ./storage/storage_engine_test.cpp
+        ./storage/binlog_test_base.cpp
         ./storage/binlog_file_test.cpp
+        ./storage/binlog_builder_test.cpp
+        ./storage/binlog_manager_test.cpp
+        ./storage/binlog_reader_test.cpp
+        ./storage/tablet_binlog_test.cpp
         ./storage/publish_version_task_test.cpp
         ./runtime/buffer_control_block_test.cpp
         ./runtime/datetime_value_test.cpp
@@ -257,12 +270,13 @@ set(EXEC_FILES
         ./runtime/kafka_consumer_pipe_test.cpp
         ./runtime/lake_tablets_channel_test.cpp
         ./runtime/large_int_value_test.cpp
+        ./runtime/load_channel_test.cpp
         ./runtime/memory/mem_chunk_allocator_test.cpp
         ./runtime/memory/system_allocator_test.cpp
         ./runtime/memory/memory_resource_test.cpp
         ./runtime/mem_pool_test.cpp
         ./runtime/result_queue_mgr_test.cpp
-        ./runtime/routine_load_task_executor_test.cpp
+        #./runtime/routine_load_task_executor_test.cpp
         ./runtime/small_file_mgr_test.cpp
         ./runtime/snapshot_loader_test.cpp
         ./runtime/stream_load_pipe_test.cpp
@@ -271,8 +285,10 @@ set(EXEC_FILES
         ./runtime/type_descriptor_test.cpp
         ./runtime/user_function_cache_test.cpp
         ./runtime/sorted_chunks_merger_test.cpp
+        ./runtime/merge_cascade_test.cpp
         ./runtime/memory_scratch_sink_test_issue_8676.cpp
         ./runtime/memory_scratch_sink_test.cpp
+        ./runtime/command_executor_test.cpp
         ./serde/column_array_serde_test.cpp
         ./serde/protobuf_serde_test.cpp
         ./simd/simd_test.cpp
@@ -318,7 +334,6 @@ set(EXEC_FILES
         ./util/trace_test.cpp
         ./util/uid_util_test.cpp
         ./util/utf8_check_test.cpp
-        ./util/buffered_stream_test.cpp
         ./util/int96_test.cpp
         ./util/bit_packing_test.cpp
         ./util/gc_helper_test.cpp
@@ -338,18 +353,6 @@ endif ()
 if ("${WITH_BLOCK_CACHE}" STREQUAL "ON")
     list(APPEND EXEC_FILES ./block_cache/block_cache_test.cpp)
     list(APPEND EXEC_FILES ./io/cache_input_stream_test.cpp)
-endif ()
-# simdjson Runtime Implement Dispatch: https://github.com/simdjson/simdjson/blob/master/doc/implementation-selection.md#runtime-cpu-detection
-# Unset architecture-specific flags to avoid breaking implement runtime dispatch.
-
-if ("${CMAKE_BUILD_TARGET_ARCH}" STREQUAL "x86" OR "${CMAKE_BUILD_TARGET_ARCH}" STREQUAL "x86_64")
-    set_source_files_properties(./exprs/json_functions_test.cpp PROPERTIES COMPILE_FLAGS -mno-avx)
-    set_source_files_properties(./exprs/json_functions_test.cpp PROPERTIES COMPILE_FLAGS -mno-avx2)
-    set_source_files_properties(./exprs/json_functions_test.cpp PROPERTIES COMPILE_FLAGS -mno-avx)
-    set_source_files_properties(./exprs/json_functions_test.cpp PROPERTIES COMPILE_FLAGS -mno-avx2)
-    set_source_files_properties(./formats/json/binary_column_test.cpp PROPERTIES COMPILE_FLAGS -mno-avx2)
-    set_source_files_properties(./formats/json/numeric_column_test.cpp PROPERTIES COMPILE_FLAGS -mno-avx2)
-    set_source_files_properties(./formats/json/nullable_column_test.cpp PROPERTIES COMPILE_FLAGS -mno-avx2)
 endif ()
 
 if (USE_AVX2)

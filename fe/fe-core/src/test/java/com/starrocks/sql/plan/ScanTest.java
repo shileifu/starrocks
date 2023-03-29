@@ -320,9 +320,8 @@ public class ScanTest extends PlanTestBase {
     public void testMergeTwoFilters() throws Exception {
         String sql = "select v1 from t0 where v2 < null group by v1 HAVING NULL IS NULL;";
         String planFragment = getFragmentPlan(sql);
-        Assert.assertTrue(planFragment.contains("  1:AGGREGATE (update finalize)\n"
-                + "  |  group by: 1: v1\n"
-                + "  |  having: TRUE\n"));
+        assertContains(planFragment, "  1:AGGREGATE (update finalize)\n"
+                + "  |  group by: 1: v1");
 
         Assert.assertTrue(planFragment.contains("  0:EMPTYSET\n"));
     }
@@ -344,8 +343,7 @@ public class ScanTest extends PlanTestBase {
         String explainString = getFragmentPlan(queryStr);
         Assert.assertTrue(explainString.contains("  1:AGGREGATE (update finalize)\n"
                 + "  |  output: min(1: v1)\n"
-                + "  |  group by: \n"
-                + "  |  having: TRUE\n"));
+                + "  |  group by: \n"));
     }
 
     @Test
@@ -408,5 +406,43 @@ public class ScanTest extends PlanTestBase {
         sql = "select * from ods_order where order_no not in (1,2,3)";
         plan = getFragmentPlan(sql);
         assertContains(plan, "FROM `ods_order` WHERE (order_no NOT IN ('1', '2', '3'))");
+    }
+
+    @Test
+    public void testMetaScanWithCount() throws Exception {
+        String sql = "select count(*),count(),count(t1a),count(t1b),count(t1c) from test_all_type[_META_]";
+        String plan = getFragmentPlan(sql);
+        assertContains(plan, "  1:AGGREGATE (update serialize)\n" +
+                "  |  output: sum(count_t1a), sum(count_t1a), sum(count_t1a), sum(count_t1a)\n" +
+                "  |  group by: \n" +
+                "  |  \n" +
+                "  0:MetaScan\n" +
+                "     Table: test_all_type\n" +
+                "     <id 16> : count_t1a");
+        // compatibility test
+        // we should keep nullable attribute of columns consistent with previous version,
+        // see more detail in the description of https://github.com/StarRocks/starrocks/pull/17619
+        // without count, all columns should be not null
+        sql = "select min(t1a),max(t1a),dict_merge(t1a) from test_all_type_not_null[_META_]";
+        plan = getVerboseExplain(sql);
+        assertContains(plan, "aggregate: " +
+                "min[([min_t1a, VARCHAR, false]); args: VARCHAR; result: VARCHAR; " +
+                "args nullable: false; result nullable: true], " +
+                "max[([max_t1a, VARCHAR, false]); args: VARCHAR; result: VARCHAR; " +
+                "args nullable: false; result nullable: true], " +
+                "dict_merge[([dict_merge_t1a, VARCHAR, false]); args: INVALID_TYPE; " +
+                "result: VARCHAR; args nullable: false; result nullable: true]");
+
+        // with count, all columns should be nullable
+        sql = "select min(t1a),max(t1a),dict_merge(t1a),count() from test_all_type_not_null[_META_]";
+        plan = getVerboseExplain(sql);
+        assertContains(plan, "min[([min_t1a, VARCHAR, true]); args: VARCHAR; result: VARCHAR; " +
+                "args nullable: true; result nullable: true], " +
+                "max[([max_t1a, VARCHAR, true]); args: VARCHAR; result: VARCHAR; " +
+                "args nullable: true; result nullable: true], " +
+                "dict_merge[([dict_merge_t1a, VARCHAR, true]); args: INVALID_TYPE; result: VARCHAR; " +
+                "args nullable: true; result nullable: true], " +
+                "sum[([count_t1a, VARCHAR, true]); args: BIGINT; result: BIGINT; " +
+                "args nullable: true; result nullable: true]");
     }
 }

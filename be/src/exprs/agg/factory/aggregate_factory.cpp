@@ -106,8 +106,8 @@ static const AggregateFunction* get_function(const std::string& name, LogicalTyp
         }
     }
 
-    auto is_decimal_type = [](LogicalType pt) {
-        return pt == TYPE_DECIMAL32 || pt == TYPE_DECIMAL64 || pt == TYPE_DECIMAL128;
+    auto is_decimal_type = [](LogicalType lt) {
+        return lt == TYPE_DECIMAL32 || lt == TYPE_DECIMAL64 || lt == TYPE_DECIMAL128;
     };
     if (func_version > 2 && is_decimal_type(arg_type)) {
         if (name == "sum") {
@@ -120,8 +120,12 @@ static const AggregateFunction* get_function(const std::string& name, LogicalTyp
     }
 
     if (binary_type == TFunctionBinaryType::BUILTIN) {
-        return AggregateFuncResolver::instance()->get_aggregate_info(func_name, arg_type, return_type,
-                                                                     is_window_function, is_null);
+        auto func = AggregateFuncResolver::instance()->get_aggregate_info(func_name, arg_type, return_type,
+                                                                          is_window_function, is_null);
+        if (func != nullptr) {
+            return func;
+        }
+        return AggregateFuncResolver::instance()->get_general_info(func_name, is_window_function, is_null);
     } else if (binary_type == TFunctionBinaryType::SRJAR) {
         return getJavaUDAFFunction(is_null);
     }

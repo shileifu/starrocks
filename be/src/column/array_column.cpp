@@ -35,6 +35,7 @@ void ArrayColumn::check_or_die() const {
 
 ArrayColumn::ArrayColumn(ColumnPtr elements, UInt32Column::Ptr offsets)
         : _elements(std::move(elements)), _offsets(std::move(offsets)) {
+    DCHECK(_elements->is_nullable());
     if (_offsets->empty()) {
         _offsets->append(0);
     }
@@ -532,10 +533,11 @@ bool ArrayColumn::set_null(size_t idx) {
     return false;
 }
 
-size_t ArrayColumn::element_memory_usage(size_t from, size_t size) const {
+size_t ArrayColumn::reference_memory_usage(size_t from, size_t size) const {
     DCHECK_LE(from + size, this->size()) << "Range error";
-    return _elements->element_memory_usage(_offsets->get_data()[from], _offsets->get_data()[from + size]) +
-           _offsets->Column::element_memory_usage(from, size);
+    size_t start_offset = _offsets->get_data()[from];
+    size_t elements_num = _offsets->get_data()[from + size] - start_offset;
+    return _elements->reference_memory_usage(start_offset, elements_num) + _offsets->reference_memory_usage(from, size);
 }
 
 void ArrayColumn::swap_column(Column& rhs) {
@@ -588,49 +590,6 @@ StatusOr<ColumnPtr> ArrayColumn::upgrade_if_overflow() {
 
 StatusOr<ColumnPtr> ArrayColumn::downgrade() {
     return downgrade_helper_func(&_elements);
-}
-
-bool ArrayColumn::empty_null_array(const NullColumnPtr& null_map) {
-    DCHECK(null_map->size() == this->size());
-    bool need_empty = false;
-    auto size = this->size();
-    // TODO: optimize it using SIMD
-    for (auto i = 0; i < size && !need_empty; ++i) {
-        if (null_map->get_data()[i] && _offsets->get_data()[i + 1] != _offsets->get_data()[i]) {
-            need_empty = true;
-        }
-    }
-    // TODO: copy too much may result in worse performance.
-    if (need_empty) {
-        auto new_array_column = clone_empty();
-        int count = 0;
-        int null_count = 0;
-        for (size_t i = 0; i < size; ++i) {
-            if (null_map->get_data()[i]) {
-                ++null_count;
-                if (count > 0) {
-                    new_array_column->append(*this, i - count, count);
-                    count = 0;
-                }
-            } else {
-                ++count;
-                if (null_count > 0) {
-                    new_array_column->append_default(null_count);
-                    null_count = 0;
-                }
-            }
-        }
-        if (count > 0) {
-            new_array_column->append(*this, size - count, count);
-            count = 0;
-        }
-        if (null_count > 0) {
-            new_array_column->append_default(null_count);
-            null_count = 0;
-        }
-        swap_column(*new_array_column.get());
-    }
-    return need_empty;
 }
 
 Status ArrayColumn::unfold_const_children(const starrocks::TypeDescriptor& type) {

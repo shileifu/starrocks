@@ -124,7 +124,8 @@ StatusOr<SegmentPtr> Tablet::load_segment(std::string_view segment_name, int seg
     }
     ASSIGN_OR_RETURN(auto tablet_schema, get_schema());
     ASSIGN_OR_RETURN(auto fs, FileSystem::CreateSharedFromString(location));
-    ASSIGN_OR_RETURN(segment, Segment::open(fs, location, seg_id, std::move(tablet_schema), footer_size_hint));
+    ASSIGN_OR_RETURN(segment, Segment::open(fs, location, seg_id, std::move(tablet_schema), footer_size_hint, nullptr,
+                                            !fill_cache));
     if (fill_cache) {
         _mgr->cache_segment(location, segment);
     }
@@ -153,6 +154,10 @@ std::string Tablet::segment_location(std::string_view segment_name) const {
 
 std::string Tablet::del_location(std::string_view del_name) const {
     return _mgr->del_location(_id, del_name);
+}
+
+std::string Tablet::delvec_location(int64_t version) const {
+    return _mgr->delvec_location(_id, version);
 }
 
 std::string Tablet::root_location() const {

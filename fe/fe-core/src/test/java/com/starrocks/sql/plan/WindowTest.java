@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package com.starrocks.sql.plan;
 
 import com.starrocks.common.FeConstants;
@@ -30,12 +29,16 @@ public class WindowTest extends PlanTestBase {
 
         sql = "select lag(id_decimal, 1, 10000) over(partition by t1c) from test_all_type;";
         plan = getThriftPlan(sql);
-        String expectSlice = "fn:TFunction(name:TFunctionName(function_name:lag), binary_type:BUILTIN," +
-                " arg_types:[TTypeDesc(types:[TTypeNode(type:SCALAR, scalar_type:TScalarType(type:DECIMAL64," +
-                " precision:10, scale:2))])], ret_type:TTypeDesc(types:[TTypeNode(type:SCALAR, " +
-                "scalar_type:TScalarType(type:DECIMAL64, precision:10, scale:2))]), has_var_args:false, " +
-                "signature:lag(DECIMAL64(10,2))";
-        Assert.assertTrue(plan.contains(expectSlice));
+        String expectSlice = "fn:TFunction(name:TFunctionName(function_name:lag), binary_type:BUILTIN, " +
+                "arg_types:[" +
+                "TTypeDesc(types:[TTypeNode(type:SCALAR, scalar_type:TScalarType(type:DECIMAL64, precision:10, scale:2))]), " +
+                "TTypeDesc(types:[TTypeNode(type:SCALAR, scalar_type:TScalarType(type:BIGINT))]), " +
+                "TTypeDesc(types:[TTypeNode(type:SCALAR, scalar_type:TScalarType(type:DECIMAL64, precision:10, scale:2))])], " +
+                "ret_type:TTypeDesc(types:[TTypeNode(type:SCALAR, " +
+                "scalar_type:TScalarType(type:DECIMAL64, precision:10, scale:2))]), " +
+                "has_var_args:false, signature:lag(DECIMAL64(10,2), BIGINT, DECIMAL64(10,2))";
+        System.out.println(expectSlice);
+        Assert.assertTrue(plan, plan.contains(expectSlice));
 
         sql = "select lag(null, 1,1) OVER () from t0";
         plan = getFragmentPlan(sql);
@@ -190,21 +193,23 @@ public class WindowTest extends PlanTestBase {
     public void testWindowPartitionAndSortSameColumn() throws Exception {
         String sql = "SELECT k3, avg(k3) OVER (partition by k3 order by k3) AS sum FROM baseall;";
         String plan = getFragmentPlan(sql);
-        assertContains(plan, "  3:ANALYTIC\n" +
+        assertContains(plan, "  2:ANALYTIC\n" +
                 "  |  functions: [, avg(3: k3), ]\n" +
                 "  |  partition by: 3: k3\n" +
-                "  |  order by: 3: k3 ASC");
-        assertContains(plan, "  2:SORT\n" +
-                "  |  order by: <slot 3> 3: k3 ASC");
+                "  |  order by: 3: k3 ASC\n" +
+                "  |  window: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW");
+        assertContains(plan, "  1:SORT\n" +
+                "  |  order by: <slot 3> 3: k3 ASC\n" +
+                "  |  offset: 0");
     }
 
     @Test
     public void testWindowDuplicatePartition() throws Exception {
         String sql = "select max(v3) over (partition by v2,v2,v2 order by v2,v2) from t0;";
         String plan = getFragmentPlan(sql);
-        assertContains(plan, "  2:SORT\n"
-                + "  |  order by: <slot 2> 2: v2 ASC\n"
-                + "  |  offset: 0");
+        assertContains(plan, "  1:SORT\n" +
+                "  |  order by: <slot 2> 2: v2 ASC\n" +
+                "  |  offset: 0");
 
     }
 
@@ -272,16 +277,11 @@ public class WindowTest extends PlanTestBase {
         // Normal case.
         sql = "select v1, v2, NTILE(2) over (partition by v1 order by v2) as j1 from t0";
         String plan = getFragmentPlan(sql);
-        assertContains(plan,
-                "  3:ANALYTIC\n" +
-                        "  |  functions: [, ntile(2), ]\n" +
-                        "  |  partition by: 1: v1\n" +
-                        "  |  order by: 2: v2 ASC\n" +
-                        "  |  window: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n" +
-                        "  |  \n" +
-                        "  2:SORT\n" +
-                        "  |  order by: <slot 1> 1: v1 ASC, <slot 2> 2: v2 ASC\n" +
-                        "  |  offset: 0");
+        assertContains(plan, "  2:ANALYTIC\n" +
+                "  |  functions: [, ntile(2), ]\n" +
+                "  |  partition by: 1: v1\n" +
+                "  |  order by: 2: v2 ASC\n" +
+                "  |  window: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT RO");
     }
 
     @Test
@@ -499,7 +499,7 @@ public class WindowTest extends PlanTestBase {
                     "  1:EXCHANGE");
         }
         {
-            // Do not support multi partition by right now, this test need to be updated when supported
+            // Support multi partition by.
             String sql = "select * from (\n" +
                     "    select *, " +
                     "        row_number() over (partition by v2, v3 order by v1) as rk " +
@@ -507,11 +507,24 @@ public class WindowTest extends PlanTestBase {
                     ") sub_t0\n" +
                     "where rk <= 4;";
             String plan = getFragmentPlan(sql);
-            assertContains(plan, "  2:SORT\n" +
+            assertContains(plan, "  1:PARTITION-TOP-N\n" +
+                    "  |  partition by: 2: v2 , 3: v3 \n" +
+                    "  |  partition limit: 4\n" +
                     "  |  order by: <slot 2> 2: v2 ASC, <slot 3> 3: v3 ASC, <slot 1> 1: v1 ASC\n" +
-                    "  |  offset: 0\n" +
-                    "  |  \n" +
-                    "  1:EXCHANGE");
+                    "  |  offset: 0");
+
+            sql = "select * from (\n" +
+                    "    select *, " +
+                    "        row_number() over (partition by v2, v3 order by v1) as rk " +
+                    "    from t0\n" +
+                    ") sub_t0\n" +
+                    "order by rk limit 4;";
+            plan = getFragmentPlan(sql);
+            assertContains(plan, "  1:PARTITION-TOP-N\n" +
+                    "  |  partition by: 2: v2 , 3: v3 \n" +
+                    "  |  partition limit: 4\n" +
+                    "  |  order by: <slot 2> 2: v2 ASC, <slot 3> 3: v3 ASC, <slot 1> 1: v1 ASC\n" +
+                    "  |  offset: 0");
         }
         FeConstants.runningUnitTest = false;
     }
@@ -653,7 +666,7 @@ public class WindowTest extends PlanTestBase {
                 "(select v1 from t0 where v1 = 1) b " +
                 "where a.v1 = b.v1";
         String plan = getVerboseExplain(sql);
-        assertContains(plan, "  2:SORT\n" +
+        assertContains(plan, "  1:SORT\n" +
                 "  |  order by: [1, BIGINT, true] ASC, [2, BIGINT, true] DESC\n" +
                 "  |  offset: 0\n" +
                 "  |  cardinality: 1\n" +
@@ -669,7 +682,7 @@ public class WindowTest extends PlanTestBase {
                 "where a.v1 = b.v1";
 
         String plan = getVerboseExplain(sql);
-        assertContains(plan, "3:ANALYTIC\n" +
+        assertContains(plan, "  2:ANALYTIC\n" +
                 "  |  functions: [, sum[([2: v2, BIGINT, true]); args: BIGINT; " +
                 "result: BIGINT; args nullable: true; result nullable: true], ]\n" +
                 "  |  partition by: [3: v3, BIGINT, true]\n" +
@@ -678,5 +691,99 @@ public class WindowTest extends PlanTestBase {
                 "  |  cardinality: 1\n" +
                 "  |  probe runtime filters:\n" +
                 "  |  - filter_id = 0, probe_expr = (1: v1)");
+    }
+
+    @Test
+    public void testHashBasedWindowTest() throws Exception {
+        {
+            String sql = "select sum(v1) over ([hash] partition by v1,v2 )," +
+                    "sum(v1/v3) over ([hash] partition by v1,v2 ) " +
+                    "from t0";
+            String plan = getFragmentPlan(sql);
+            assertContains(plan, "  1:ANALYTIC\n" +
+                    "  |  functions: [, sum(1: v1), ], [, sum(CAST(1: v1 AS DOUBLE) / CAST(3: v3 AS DOUBLE)), ]\n" +
+                    "  |  partition by: 1: v1, 2: v2\n" +
+                    "  |  useHashBasedPartition");
+        }
+        {
+            String sql = "select sum(v1) over ( partition by v1,v2 )," +
+                    "sum(v1/v3) over ([hash] partition by v1,v2 ) " +
+                    "from t0";
+            String plan = getFragmentPlan(sql);
+            assertContains(plan, "  4:ANALYTIC\n" +
+                    "  |  functions: [, sum(1: v1), ]\n" +
+                    "  |  partition by: 1: v1, 2: v2");
+            assertContains(plan, "  1:ANALYTIC\n" +
+                    "  |  functions: [, sum(CAST(1: v1 AS DOUBLE) / CAST(3: v3 AS DOUBLE)), ]\n" +
+                    "  |  partition by: 1: v1, 2: v2\n" +
+                    "  |  useHashBasedPartition");
+        }
+        {
+            String sql = "select sum(v1) over ([hash] partition by v1 )," +
+                    "sum(v1/v3) over ([hash] partition by v1,v2 ) " +
+                    "from t0";
+            String plan = getFragmentPlan(sql);
+            assertContains(plan, "  3:ANALYTIC\n" +
+                    "  |  functions: [, sum(1: v1), ]\n" +
+                    "  |  partition by: 1: v1\n" +
+                    "  |  useHashBasedPartition");
+            assertContains(plan, "  1:ANALYTIC\n" +
+                    "  |  functions: [, sum(CAST(1: v1 AS DOUBLE) / CAST(3: v3 AS DOUBLE)), ]\n" +
+                    "  |  partition by: 1: v1, 2: v2\n" +
+                    "  |  useHashBasedPartition");
+        }
+    }
+
+    @Test
+    public void testOneTablet() throws Exception {
+        {
+            String sql = "select v1 from (" +
+                    "select v1, dense_rank() over (partition by v1 order by v3) rk from t0" +
+                    ") temp " +
+                    "where rk = 1 " +
+                    "group by v1";
+            String plan = getFragmentPlan(sql);
+            assertContains(plan, "  2:ANALYTIC\n" +
+                    "  |  functions: [, dense_rank(), ]\n" +
+                    "  |  partition by: 1: v1\n" +
+                    "  |  order by: 3: v3 ASC\n" +
+                    "  |  window: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n" +
+                    "  |  \n" +
+                    "  1:SORT\n" +
+                    "  |  order by: <slot 1> 1: v1 ASC, <slot 3> 3: v3 ASC\n" +
+                    "  |  offset: 0\n" +
+                    "  |  \n" +
+                    "  0:OlapScanNode\n" +
+                    "     TABLE: t0");
+            assertContains(plan, "  5:AGGREGATE (update finalize)\n" +
+                    "  |  group by: 1: v1\n" +
+                    "  |  \n" +
+                    "  4:Project\n" +
+                    "  |  <slot 1> : 1: v1");
+        }
+        {
+            String sql = "select v1 from (" +
+                    "select v1, dense_rank() over (partition by v1, v2 order by v3) rk from t0" +
+                    ") temp " +
+                    "where rk = 1 " +
+                    "group by v1";
+            String plan = getFragmentPlan(sql);
+            assertContains(plan, "  2:ANALYTIC\n" +
+                    "  |  functions: [, dense_rank(), ]\n" +
+                    "  |  partition by: 1: v1, 2: v2\n" +
+                    "  |  order by: 3: v3 ASC\n" +
+                    "  |  window: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n" +
+                    "  |  \n" +
+                    "  1:SORT\n" +
+                    "  |  order by: <slot 1> 1: v1 ASC, <slot 2> 2: v2 ASC, <slot 3> 3: v3 ASC\n" +
+                    "  |  offset: 0\n" +
+                    "  |  \n" +
+                    "  0:OlapScanNode\n" +
+                    "     TABLE: t0");
+            assertContains(plan, "  7:AGGREGATE (merge finalize)\n" +
+                    "  |  group by: 1: v1\n" +
+                    "  |  \n" +
+                    "  6:EXCHANGE");
+        }
     }
 }

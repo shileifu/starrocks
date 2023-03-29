@@ -39,17 +39,17 @@ import com.starrocks.analysis.Analyzer;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.TabletInvertedIndex;
 import com.starrocks.common.AnalysisException;
-import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.FeConstants;
 import com.starrocks.lake.StarOSAgent;
 import com.starrocks.persist.EditLog;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.RunMode;
 import com.starrocks.sql.ast.AddBackendClause;
 import com.starrocks.sql.ast.AlterSystemStmt;
 import com.starrocks.sql.ast.DropBackendClause;
-import com.starrocks.system.Backend;
+import com.starrocks.system.DataNode;
 import com.starrocks.system.SystemInfoService;
 import mockit.Expectations;
 import mockit.Mock;
@@ -88,13 +88,13 @@ public class SystemInfoServiceTest {
     public void setUp() throws IOException {
         new Expectations() {
             {
-                editLog.logAddBackend((Backend) any);
+                editLog.logAddBackend((DataNode) any);
                 minTimes = 0;
 
-                editLog.logDropBackend((Backend) any);
+                editLog.logDropBackend((DataNode) any);
                 minTimes = 0;
 
-                editLog.logBackendStateChange((Backend) any);
+                editLog.logBackendStateChange((DataNode) any);
                 minTimes = 0;
 
                 db.readLock();
@@ -138,7 +138,7 @@ public class SystemInfoServiceTest {
 
                 GlobalStateMgr.getCurrentStateJournalVersion();
                 minTimes = 0;
-                result = FeConstants.meta_version;
+                result = FeConstants.META_VERSION;
             }
         };
 
@@ -273,8 +273,13 @@ public class SystemInfoServiceTest {
             Assert.assertTrue(e.getMessage().contains("does not exist"));
         }
 
-        // test removeWorker
-        Config.integrate_starmgr = true;
+        new MockUp<RunMode>() {
+            @Mock
+            public RunMode getCurrentRunMode() {
+                return RunMode.SHARED_DATA;
+            }
+        };
+
         StarOSAgent starosAgent = new StarOSAgent();
         new Expectations(starosAgent) {
             {
@@ -320,8 +325,6 @@ public class SystemInfoServiceTest {
         } catch (DdlException e) {
             Assert.assertTrue(e.getMessage().contains("does not exist"));
         }
-
-        Config.integrate_starmgr = false;
     }
 
     @Test
@@ -333,7 +336,7 @@ public class SystemInfoServiceTest {
         file.createNewFile();
         DataOutputStream dos = new DataOutputStream(new FileOutputStream(file));
         SystemInfoService systemInfoService = GlobalStateMgr.getCurrentSystemInfo();
-        Backend back1 = new Backend(1L, "localhost", 3);
+        DataNode back1 = new DataNode(1L, "localhost", 3);
         back1.updateOnce(4, 6, 8);
         systemInfoService.replayAddBackend(back1);
         long checksum1 = systemInfoService.saveBackends(dos, 0);
@@ -345,7 +348,7 @@ public class SystemInfoServiceTest {
         long checksum2 = systemInfoService.loadBackends(dis, 0);
         Assert.assertEquals(checksum1, checksum2);
         Assert.assertEquals(1, systemInfoService.getIdToBackend().size());
-        Backend back2 = systemInfoService.getBackend(1);
+        DataNode back2 = systemInfoService.getBackend(1);
         Assert.assertTrue(back1.equals(back2));
         dis.close();
 

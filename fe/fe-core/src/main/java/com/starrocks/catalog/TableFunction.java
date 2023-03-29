@@ -65,6 +65,13 @@ public class TableFunction extends Function {
         setBinaryType(TFunctionBinaryType.BUILTIN);
     }
 
+    public TableFunction(TableFunction other) {
+        super(other);
+        defaultColumnNames = other.defaultColumnNames;
+        tableFnReturnTypes = other.tableFnReturnTypes;
+        symbolName = other.symbolName;
+    }
+
     public static void initBuiltins(FunctionSet functionSet) {
         TableFunction unnestFunction = new TableFunction(new FunctionName("unnest"), Lists.newArrayList("unnest"),
                 Lists.newArrayList(Type.ANY_ARRAY), Lists.newArrayList(Type.ANY_ELEMENT), true);
@@ -74,6 +81,22 @@ public class TableFunction extends Function {
                 new TableFunction(new FunctionName("json_each"), Lists.newArrayList("key", "value"),
                         Lists.newArrayList(Type.JSON), Lists.newArrayList(Type.VARCHAR, Type.JSON));
         functionSet.addBuiltin(jsonEachFunction);
+
+        for (Type type : Lists.newArrayList(Type.TINYINT, Type.SMALLINT, Type.INT, Type.BIGINT, Type.LARGEINT)) {
+            // generate_series with default step size: 1
+            TableFunction func = new TableFunction(new FunctionName("generate_series"),
+                                                   Lists.newArrayList("generate_series"),
+                                                   Lists.newArrayList(type, type),
+                                                   Lists.newArrayList(type));
+            functionSet.addBuiltin(func);
+
+            // generate_series with explicit step size
+            func = new TableFunction(new FunctionName("generate_series"),
+                    Lists.newArrayList("generate_series"),
+                    Lists.newArrayList(type, type, type),
+                    Lists.newArrayList(type));
+            functionSet.addBuiltin(func);
+        }
     }
 
     public List<Type> getTableFnReturnTypes() {
@@ -125,5 +148,10 @@ public class TableFunction extends Function {
         properties.put(CreateFunctionStmt.SYMBOL_KEY, symbolName);
         properties.put(CreateFunctionStmt.TYPE_KEY, getBinaryType().name());
         return new Gson().toJson(properties);
+    }
+
+    @Override
+    public Function copy() {
+        return new TableFunction(this);
     }
 }

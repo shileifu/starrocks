@@ -50,11 +50,6 @@ Status OlapMetaReader::init(const OlapMetaReaderParams& read_params) {
     RETURN_IF_ERROR(_build_collect_context(read_params));
     RETURN_IF_ERROR(_init_seg_meta_collecters(read_params));
 
-    if (_collect_context.seg_collecters.size() == 0) {
-        _has_more = false;
-        return Status::OK();
-    }
-
     _collect_context.cursor_idx = 0;
     _is_init = true;
     _has_more = true;
@@ -97,6 +92,7 @@ Status OlapMetaReader::_build_collect_context(const OlapMetaReaderParams& read_p
         } else {
             _collect_context.seg_collecter_params.read_page.emplace_back(false);
         }
+        _has_count_agg |= (collect_field == "count");
     }
     return Status::OK();
 }
@@ -167,25 +163,4 @@ Status OlapMetaReader::do_get_next(ChunkPtr* result) {
 
     return Status::OK();
 }
-
-Status OlapMetaReader::_fill_result_chunk(Chunk* chunk) {
-    for (size_t i = 0; i < _collect_context.result_slot_ids.size(); i++) {
-        auto s_id = _collect_context.result_slot_ids[i];
-        auto slot = _params.desc_tbl->get_slot_descriptor(s_id);
-        if (_collect_context.seg_collecter_params.fields[i] == "dict_merge") {
-            TypeDescriptor item_desc;
-            item_desc = slot->type();
-            TypeDescriptor desc;
-            desc.type = TYPE_ARRAY;
-            desc.children.emplace_back(item_desc);
-            ColumnPtr column = ColumnHelper::create_column(desc, false);
-            chunk->append_column(std::move(column), slot->id());
-        } else {
-            ColumnPtr column = ColumnHelper::create_column(slot->type(), false);
-            chunk->append_column(std::move(column), slot->id());
-        }
-    }
-    return Status::OK();
-}
-
 } // namespace starrocks

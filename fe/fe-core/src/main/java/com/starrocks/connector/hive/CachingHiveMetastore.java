@@ -39,6 +39,7 @@ import org.jetbrains.annotations.NotNull;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.function.Function;
@@ -174,6 +175,10 @@ public class CachingHiveMetastore implements IHiveMetastore {
         return get(tableNamesCache, dbName);
     }
 
+    public Set<HiveTableName> getCachedTableNames() {
+        return partitionKeysCache.asMap().keySet();
+    }
+
     private List<String> loadAllTableNames(String dbName) {
         return metastore.getAllTableNames(dbName);
     }
@@ -303,7 +308,7 @@ public class CachingHiveMetastore implements IHiveMetastore {
         ));
     }
 
-    public synchronized void refreshTable(String hiveDbName, String hiveTblName) {
+    public synchronized void refreshTable(String hiveDbName, String hiveTblName, boolean onlyCachedPartitions) {
         HiveTableName hiveTableName = HiveTableName.of(hiveDbName, hiveTblName);
         Table updatedTable = loadTable(hiveTableName);
         tableCache.put(hiveTableName, updatedTable);
@@ -319,14 +324,22 @@ public class CachingHiveMetastore implements IHiveMetastore {
             tableStatsCache.put(hiveTableName, loadTableStatistics(hiveTableName));
         } else {
             List<String> existNames = loadPartitionKeys(hiveTableName);
+            List<HivePartitionName> presentPartitionNames;
+            List<HivePartitionName> presentPartitionStatistics;
 
-            List<HivePartitionName> presentPartitionNames = getPresentPartitionNames(
-                    partitionCache, hiveDbName, hiveTblName);
+            if (onlyCachedPartitions) {
+                presentPartitionNames = getPresentPartitionNames(partitionCache, hiveDbName, hiveTblName);
+                presentPartitionStatistics = getPresentPartitionNames(partitionStatsCache, hiveDbName, hiveTblName);
+            } else {
+                presentPartitionNames = presentPartitionStatistics = existNames.stream()
+                        .map(partitionKey -> HivePartitionName.of(hiveDbName, hiveTblName, partitionKey))
+                        .collect(Collectors.toList());
+            }
+
             refreshPartitions(presentPartitionNames, existNames, this::loadPartitionsByNames, partitionCache);
-
-            List<HivePartitionName> presentPartitionStatistics = getPresentPartitionNames(
-                    partitionStatsCache, hiveDbName, hiveTblName);
-            refreshPartitions(presentPartitionStatistics, existNames, this::loadPartitionsStatistics, partitionStatsCache);
+            if (Config.enable_refresh_hive_partitions_statistics) {
+                refreshPartitions(presentPartitionStatistics, existNames, this::loadPartitionsStatistics, partitionStatsCache);
+            }
         }
     }
 

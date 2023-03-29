@@ -14,6 +14,7 @@
 
 package com.starrocks.qe;
 
+import com.google.api.client.util.Lists;
 import com.starrocks.analysis.FunctionName;
 import com.starrocks.analysis.ParseNode;
 import com.starrocks.catalog.Database;
@@ -42,9 +43,9 @@ import com.starrocks.sql.ast.AlterSystemStmt;
 import com.starrocks.sql.ast.AlterTableStmt;
 import com.starrocks.sql.ast.AlterUserStmt;
 import com.starrocks.sql.ast.AlterViewStmt;
+import com.starrocks.sql.ast.AlterWarehouseStmt;
 import com.starrocks.sql.ast.AstVisitor;
 import com.starrocks.sql.ast.BackupStmt;
-import com.starrocks.sql.ast.BaseCreateAlterUserStmt;
 import com.starrocks.sql.ast.BaseGrantRevokePrivilegeStmt;
 import com.starrocks.sql.ast.BaseGrantRevokeRoleStmt;
 import com.starrocks.sql.ast.CancelAlterSystemStmt;
@@ -69,6 +70,8 @@ import com.starrocks.sql.ast.CreateTableLikeStmt;
 import com.starrocks.sql.ast.CreateTableStmt;
 import com.starrocks.sql.ast.CreateUserStmt;
 import com.starrocks.sql.ast.CreateViewStmt;
+import com.starrocks.sql.ast.CreateWarehouseStmt;
+import com.starrocks.sql.ast.DropAnalyzeJobStmt;
 import com.starrocks.sql.ast.DropCatalogStmt;
 import com.starrocks.sql.ast.DropDbStmt;
 import com.starrocks.sql.ast.DropFileStmt;
@@ -80,6 +83,7 @@ import com.starrocks.sql.ast.DropResourceStmt;
 import com.starrocks.sql.ast.DropRoleStmt;
 import com.starrocks.sql.ast.DropTableStmt;
 import com.starrocks.sql.ast.DropUserStmt;
+import com.starrocks.sql.ast.DropWarehouseStmt;
 import com.starrocks.sql.ast.GrantPrivilegeStmt;
 import com.starrocks.sql.ast.GrantRoleStmt;
 import com.starrocks.sql.ast.InstallPluginStmt;
@@ -92,12 +96,14 @@ import com.starrocks.sql.ast.RefreshMaterializedViewStatement;
 import com.starrocks.sql.ast.RefreshTableStmt;
 import com.starrocks.sql.ast.RestoreStmt;
 import com.starrocks.sql.ast.ResumeRoutineLoadStmt;
+import com.starrocks.sql.ast.ResumeWarehouseStmt;
 import com.starrocks.sql.ast.RevokePrivilegeStmt;
 import com.starrocks.sql.ast.RevokeRoleStmt;
 import com.starrocks.sql.ast.SetUserPropertyStmt;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.ast.StopRoutineLoadStmt;
 import com.starrocks.sql.ast.SubmitTaskStmt;
+import com.starrocks.sql.ast.SuspendWarehouseStmt;
 import com.starrocks.sql.ast.SyncStmt;
 import com.starrocks.sql.ast.TruncateTableStmt;
 import com.starrocks.sql.ast.UninstallPluginStmt;
@@ -110,6 +116,8 @@ import org.apache.logging.log4j.Logger;
 
 import java.io.IOException;
 import java.time.LocalDateTime;
+import java.util.Arrays;
+import java.util.List;
 
 public class DDLStmtExecutor {
 
@@ -205,13 +213,13 @@ public class DDLStmtExecutor {
             ErrorReport.wrapWithRuntimeException(() -> {
                 FunctionName name = stmt.getFunctionName();
                 if (name.isGlobalFunction()) {
-                    context.getGlobalStateMgr().getGlobalFunctionMgr().userDropFunction(stmt.getFunction());
+                    context.getGlobalStateMgr().getGlobalFunctionMgr().userDropFunction(stmt.getFunctionSearchDesc());
                 } else {
                     Database db = context.getGlobalStateMgr().getDb(name.getDb());
                     if (db == null) {
                         ErrorReport.reportDdlException(ErrorCode.ERR_BAD_DB_ERROR, name.getDb());
                     }
-                    db.dropFunction(stmt.getFunction());
+                    db.dropFunction(stmt.getFunctionSearchDesc());
                 }
             });
             return null;
@@ -278,12 +286,15 @@ public class DDLStmtExecutor {
         @Override
         public ShowResultSet visitRefreshMaterializedViewStatement(RefreshMaterializedViewStatement stmt,
                                                                    ConnectContext context) {
+            List<String> info = Lists.newArrayList();
             ErrorReport.wrapWithRuntimeException(() -> {
                 // The priority of manual refresh is higher than that of general refresh
-                context.getGlobalStateMgr().getLocalMetastore()
+                String taskId = context.getGlobalStateMgr().getLocalMetastore()
                         .refreshMaterializedView(stmt, Constants.TaskRunPriority.HIGH.value());
+                info.add(taskId);
             });
-            return null;
+
+            return new ShowResultSet(RefreshMaterializedViewStatement.META_DATA, Arrays.asList(info));
         }
 
         @Override
@@ -396,22 +407,25 @@ public class DDLStmtExecutor {
         }
 
         @Override
-        public ShowResultSet visitCreateAlterUserStatement(BaseCreateAlterUserStmt stmt, ConnectContext context) {
+        public ShowResultSet visitCreateUserStatement(CreateUserStmt stmt, ConnectContext context) {
             ErrorReport.wrapWithRuntimeException(() -> {
-                if (stmt instanceof CreateUserStmt) {
-                    if (context.getGlobalStateMgr().isUsingNewPrivilege()) {
-                        context.getGlobalStateMgr().getAuthenticationManager().createUser((CreateUserStmt) stmt);
-                    } else {
-                        context.getGlobalStateMgr().getAuth().createUser((CreateUserStmt) stmt);
-                    }
-                } else if (stmt instanceof AlterUserStmt) {
-                    if (context.getGlobalStateMgr().isUsingNewPrivilege()) {
-                        context.getGlobalStateMgr().getAuthenticationManager().alterUser((AlterUserStmt) stmt);
-                    } else {
-                        context.getGlobalStateMgr().getAuth().alterUser((AlterUserStmt) stmt);
-                    }
+                if (context.getGlobalStateMgr().isUsingNewPrivilege()) {
+                    context.getGlobalStateMgr().getAuthenticationManager().createUser(stmt);
                 } else {
-                    throw new DdlException("unsupported user stmt: " + stmt.toSql());
+                    context.getGlobalStateMgr().getAuth().createUser(stmt);
+                }
+            });
+            return null;
+        }
+
+        @Override
+        public ShowResultSet visitAlterUserStatement(AlterUserStmt stmt, ConnectContext context) {
+            ErrorReport.wrapWithRuntimeException(() -> {
+                if (context.getGlobalStateMgr().isUsingNewPrivilege()) {
+                    context.getGlobalStateMgr().getAuthenticationManager()
+                            .alterUser(stmt.getUserIdentity(), stmt.getAuthenticationInfo());
+                } else {
+                    context.getGlobalStateMgr().getAuth().alterUser(stmt);
                 }
             });
             return null;
@@ -425,7 +439,6 @@ public class DDLStmtExecutor {
                 } else {
                     context.getGlobalStateMgr().getAuth().dropUser(stmt);
                 }
-
             });
             return null;
         }
@@ -435,9 +448,9 @@ public class DDLStmtExecutor {
             ErrorReport.wrapWithRuntimeException(() -> {
                 if (context.getGlobalStateMgr().isUsingNewPrivilege()) {
                     if (stmt instanceof GrantRoleStmt) {
-                        context.getGlobalStateMgr().getPrivilegeManager().grantRole((GrantRoleStmt) stmt);
+                        context.getGlobalStateMgr().getAuthorizationManager().grantRole((GrantRoleStmt) stmt);
                     } else {
-                        context.getGlobalStateMgr().getPrivilegeManager().revokeRole((RevokeRoleStmt) stmt);
+                        context.getGlobalStateMgr().getAuthorizationManager().revokeRole((RevokeRoleStmt) stmt);
                     }
                 } else {
                     if (stmt instanceof GrantRoleStmt) {
@@ -456,13 +469,13 @@ public class DDLStmtExecutor {
             ErrorReport.wrapWithRuntimeException(() -> {
                 if (stmt instanceof GrantPrivilegeStmt) {
                     if (context.getGlobalStateMgr().isUsingNewPrivilege()) {
-                        context.getGlobalStateMgr().getPrivilegeManager().grant((GrantPrivilegeStmt) stmt);
+                        context.getGlobalStateMgr().getAuthorizationManager().grant((GrantPrivilegeStmt) stmt);
                     } else {
                         context.getGlobalStateMgr().getAuth().grant((GrantPrivilegeStmt) stmt);
                     }
                 } else {
                     if (context.getGlobalStateMgr().isUsingNewPrivilege()) {
-                        context.getGlobalStateMgr().getPrivilegeManager().revoke((RevokePrivilegeStmt) stmt);
+                        context.getGlobalStateMgr().getAuthorizationManager().revoke((RevokePrivilegeStmt) stmt);
                     } else {
                         context.getGlobalStateMgr().getAuth().revoke((RevokePrivilegeStmt) stmt);
                     }
@@ -475,7 +488,7 @@ public class DDLStmtExecutor {
         public ShowResultSet visitCreateRoleStatement(CreateRoleStmt stmt, ConnectContext context) {
             ErrorReport.wrapWithRuntimeException(() -> {
                 if (context.getGlobalStateMgr().isUsingNewPrivilege()) {
-                    context.getGlobalStateMgr().getPrivilegeManager().createRole(stmt);
+                    context.getGlobalStateMgr().getAuthorizationManager().createRole(stmt);
                 } else {
                     context.getGlobalStateMgr().getAuth().createRole(stmt);
                 }
@@ -487,7 +500,7 @@ public class DDLStmtExecutor {
         public ShowResultSet visitDropRoleStatement(DropRoleStmt stmt, ConnectContext context) {
             ErrorReport.wrapWithRuntimeException(() -> {
                 if (context.getGlobalStateMgr().isUsingNewPrivilege()) {
-                    context.getGlobalStateMgr().getPrivilegeManager().dropRole(stmt);
+                    context.getGlobalStateMgr().getAuthorizationManager().dropRole(stmt);
                 } else {
                     context.getGlobalStateMgr().getAuth().dropRole(stmt);
                 }
@@ -761,11 +774,19 @@ public class DDLStmtExecutor {
                         context.getSessionVariable().getStatisticCollectParallelism());
 
                 Thread thread = new Thread(() -> {
+                    statsConnectCtx.setThreadLocalInfo();
                     StatisticExecutor statisticExecutor = new StatisticExecutor();
                     analyzeJob.run(statsConnectCtx, statisticExecutor);
                 });
                 thread.start();
             });
+            return null;
+        }
+
+        @Override
+        public ShowResultSet visitDropAnalyzeStatement(DropAnalyzeJobStmt stmt, ConnectContext context) {
+            ErrorReport.wrapWithRuntimeException(
+                    () -> context.getGlobalStateMgr().getAnalyzeManager().removeAnalyzeJob(stmt.getId()));
             return null;
         }
 
@@ -817,6 +838,49 @@ public class DDLStmtExecutor {
             return null;
         }
 
+        // warehouse
+
+        @Override
+        public ShowResultSet visitCreateWarehouseStatement(CreateWarehouseStmt stmt, ConnectContext context) {
+            ErrorReport.wrapWithRuntimeException(() -> {
+                context.getGlobalStateMgr().getWarehouseMgr().createWarehouse(stmt);
+            });
+            return null;
+        }
+
+        @Override
+        public ShowResultSet visitAlterWarehouseStatement(AlterWarehouseStmt stmt, ConnectContext context) {
+            ErrorReport.wrapWithRuntimeException(() -> {
+                context.getGlobalStateMgr().getWarehouseMgr().alterWarehouse(stmt);
+            });
+            return null;
+        }
+
+        @Override
+        public ShowResultSet visitSuspendWarehouseStatement(SuspendWarehouseStmt stmt, ConnectContext context) {
+            ErrorReport.wrapWithRuntimeException(() -> {
+                context.getGlobalStateMgr().getWarehouseMgr().suspendWarehouse(stmt);
+            });
+            return null;
+        }
+
+        @Override
+        public ShowResultSet visitResumeWarehouseStatement(ResumeWarehouseStmt stmt, ConnectContext context) {
+            ErrorReport.wrapWithRuntimeException(() -> {
+                context.getGlobalStateMgr().getWarehouseMgr().resumeWarehouse(stmt);
+            });
+            return null;
+        }
+
+
+        @Override
+        public ShowResultSet visitDropWarehouseStatement(DropWarehouseStmt stmt, ConnectContext context) {
+            ErrorReport.wrapWithRuntimeException(() -> {
+                context.getGlobalStateMgr().getWarehouseMgr().dropWarehouse(stmt);
+            });
+            return null;
+        }
+
         @Override
         public ShowResultSet visitSubmitTaskStatement(SubmitTaskStmt stmt, ConnectContext context) {
             try {
@@ -825,6 +889,7 @@ public class DDLStmtExecutor {
                 throw new RuntimeException(e);
             }
         }
+
     }
 
 }

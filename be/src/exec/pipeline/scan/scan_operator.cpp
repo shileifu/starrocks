@@ -71,6 +71,8 @@ Status ScanOperator::prepare(RuntimeState* state) {
     _morsels_counter = ADD_COUNTER(_unique_metrics, "MorselsCount", TUnit::UNIT);
     _buffer_unplug_counter = ADD_COUNTER(_unique_metrics, "BufferUnplugCount", TUnit::UNIT);
     _submit_task_counter = ADD_COUNTER(_unique_metrics, "SubmitTaskCount", TUnit::UNIT);
+    _peak_scan_task_queue_size_counter = _unique_metrics->AddHighWaterMarkCounter(
+            "PeakScanTaskQueueSize", TUnit::UNIT, RuntimeProfile::Counter::create_strategy(TUnit::UNIT));
 
     RETURN_IF_ERROR(do_prepare(state));
 
@@ -340,6 +342,8 @@ Status ScanOperator::_trigger_next_scan(RuntimeState* state, int chunk_source_in
     task.workgroup = _workgroup.get();
     // TODO: consider more factors, such as scan bytes and i/o time.
     task.priority = OlapScanNode::compute_priority(_submit_task_counter->value());
+    task.task_group = down_cast<const ScanOperatorFactory*>(_factory)->scan_task_group();
+    task.peak_scan_task_queue_size_counter = _peak_scan_task_queue_size_counter;
     const auto io_task_start_nano = MonotonicNanos();
     task.work_function = [wp = _query_ctx, this, state, chunk_source_index, query_trace_ctx, driver_id,
                           io_task_start_nano]() {
@@ -348,6 +352,7 @@ Status ScanOperator::_trigger_next_scan(RuntimeState* state, int chunk_source_in
             // driver_id will be used in some Expr such as regex_replace
             SCOPED_SET_TRACE_INFO(driver_id, state->query_id(), state->fragment_instance_id());
             SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(state->instance_mem_tracker());
+            SCOPED_THREAD_LOCAL_OPERATOR_MEM_TRACKER_SETTER(this);
 
             auto& chunk_source = _chunk_sources[chunk_source_index];
             [[maybe_unused]] std::string category;
@@ -498,7 +503,9 @@ void ScanOperator::set_query_ctx(const QueryContextPtr& query_ctx) {
 // ========== ScanOperatorFactory ==========
 
 ScanOperatorFactory::ScanOperatorFactory(int32_t id, ScanNode* scan_node)
-        : SourceOperatorFactory(id, scan_node->name(), scan_node->id()), _scan_node(scan_node) {}
+        : SourceOperatorFactory(id, scan_node->name(), scan_node->id()),
+          _scan_node(scan_node),
+          _scan_task_group(std::make_shared<workgroup::ScanTaskGroup>()) {}
 
 Status ScanOperatorFactory::prepare(RuntimeState* state) {
     RETURN_IF_ERROR(OperatorFactory::prepare(state));
@@ -538,6 +545,8 @@ pipeline::OpFactories decompose_scan_node_to_pipeline(std::shared_ptr<ScanOperat
         ops.emplace_back(
                 std::make_shared<pipeline::LimitOperatorFactory>(context->next_operator_id(), scan_node->id(), limit));
     }
+
+    ops = context->maybe_interpolate_collect_stats(context->runtime_state(), ops);
 
     return ops;
 }

@@ -17,7 +17,7 @@ package com.starrocks.hudi.reader;
 import com.starrocks.jni.connector.ColumnType;
 import com.starrocks.jni.connector.ColumnValue;
 import com.starrocks.jni.connector.ConnectorScanner;
-import com.starrocks.jni.connector.StructSelectedFields;
+import com.starrocks.jni.connector.SelectedFields;
 import com.starrocks.utils.loader.ThreadContextClassLoader;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
@@ -37,8 +37,11 @@ import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hudi.common.model.HoodieLogFile;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.hadoop.realtime.HoodieRealtimeFileSplit;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -47,10 +50,12 @@ import java.util.Properties;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.starrocks.hudi.reader.HudiScannerUtils.MARK_TYPE_VALUE_MAPPING;
+import static com.starrocks.hudi.reader.HudiScannerUtils.HIVE_TYPE_MAPPING;
 import static java.util.stream.Collectors.toList;
 
 public class HudiSliceScanner extends ConnectorScanner {
+
+    private static final Logger LOG = LogManager.getLogger(HudiSliceScanner.class);
 
     private final String basePath;
     private final String hiveColumnNames;
@@ -93,6 +98,9 @@ public class HudiSliceScanner extends ConnectorScanner {
         this.fieldInspectors = new ObjectInspector[requiredFields.length];
         this.structFields = new StructField[requiredFields.length];
         this.classLoader = this.getClass().getClassLoader();
+        for (Map.Entry<String, String> kv : params.entrySet()) {
+            LOG.debug("key = " + kv.getKey() + ", value = " + kv.getValue());
+        }
     }
 
     private JobConf makeJobConf(Properties properties) {
@@ -120,17 +128,15 @@ public class HudiSliceScanner extends ConnectorScanner {
             requiredTypes[i] = new ColumnType(requiredFields[i], type);
         }
 
-        StructSelectedFields ssf = new StructSelectedFields();
+        // prune fields
+        SelectedFields ssf = new SelectedFields();
         for (String nestField : nestedFields) {
             ssf.addNestedPath(nestField);
         }
         for (int i = 0; i < requiredFields.length; i++) {
             ColumnType type = requiredTypes[i];
             String name = requiredFields[i];
-            if (type.isStruct()) {
-                StructSelectedFields ssf2 = ssf.findChildren(name);
-                type.pruneOnStructSelectedFields(ssf2);
-            }
+            type.pruneOnField(ssf, name);
         }
     }
 
@@ -140,18 +146,28 @@ public class HudiSliceScanner extends ConnectorScanner {
                 Arrays.stream(this.requiredColumnIds).mapToObj(String::valueOf)
                         .collect(Collectors.joining(",")));
         properties.setProperty("hive.io.file.readcolumn.names", String.join(",", this.requiredFields));
-        if (this.nestedFields.length > 0) {
-            properties.setProperty("hive.io.file.readNestedColumn.paths", String.join(",", this.nestedFields));
+        // build `readNestedColumn.paths` spec.
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < requiredFields.length; i++) {
+            String name = requiredFields[i];
+            ColumnType type = requiredTypes[i];
+            type.buildNestedFieldsSpec(name, sb);
+        }
+        if (sb.length() > 0) {
+            sb.deleteCharAt(sb.length() - 1);
+            properties.setProperty("hive.io.file.readNestedColumn.paths", sb.toString());
         }
         properties.setProperty("columns", this.hiveColumnNames);
         // recover INT64 based timestamp mark to hive type, TimestampMicros/TimestampMillis => timestamp
+        List<String> types = new ArrayList<>();
         for (int i = 0; i < this.hiveColumnTypes.length; i++) {
             String type = this.hiveColumnTypes[i];
-            if (MARK_TYPE_VALUE_MAPPING.containsKey(type)) {
-                this.hiveColumnTypes[i] = MARK_TYPE_VALUE_MAPPING.get(type);
+            if (HIVE_TYPE_MAPPING.containsKey(type)) {
+                type = HIVE_TYPE_MAPPING.get(type);
             }
+            types.add(type);
         }
-        properties.setProperty("columns.types", String.join(",", this.hiveColumnTypes));
+        properties.setProperty("columns.types", types.stream().collect(Collectors.joining(",")));
         properties.setProperty("serialization.lib", this.serde);
         return properties;
     }
@@ -161,7 +177,7 @@ public class HudiSliceScanner extends ConnectorScanner {
         String realtimePath = dataFileLength != -1 ? dataFilePath : deltaFilePaths[0];
         long realtimeLength = dataFileLength != -1 ? dataFileLength : 0;
         Path path = new Path(realtimePath);
-        FileSplit fileSplit = new FileSplit(path, 0, realtimeLength, new String[] {""});
+        FileSplit fileSplit = new FileSplit(path, 0, realtimeLength, (String[]) null);
         List<HoodieLogFile> logFiles = Arrays.stream(deltaFilePaths).map(HoodieLogFile::new).collect(toList());
         FileSplit hudiSplit =
                 new HoodieRealtimeFileSplit(fileSplit, basePath, logFiles, instantTime, false, Option.empty());
@@ -189,7 +205,7 @@ public class HudiSliceScanner extends ConnectorScanner {
             initReader(jobConf, properties);
         } catch (Exception e) {
             close();
-            e.printStackTrace();
+            LOG.error("Failed to open the hudi MOR slice reader.", e);
             throw new IOException("Failed to open the hudi MOR slice reader.", e);
         }
     }
@@ -201,7 +217,7 @@ public class HudiSliceScanner extends ConnectorScanner {
                 reader.close();
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            LOG.error("Failed to close the hudi MOR slice reader.", e);
             throw new IOException("Failed to close the hudi MOR slice reader.", e);
         }
     }
@@ -230,7 +246,7 @@ public class HudiSliceScanner extends ConnectorScanner {
             return numRows;
         } catch (Exception e) {
             close();
-            e.printStackTrace();
+            LOG.error("Failed to get the next off-heap table chunk of hudi.", e);
             throw new IOException("Failed to get the next off-heap table chunk of hudi.", e);
         }
     }

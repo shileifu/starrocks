@@ -67,6 +67,7 @@ class TabletUpdates;
 class CompactionTask;
 class CompactionCandidate;
 class CompactionContext;
+class TabletBasicInfo;
 
 using TabletSharedPtr = std::shared_ptr<Tablet>;
 
@@ -119,7 +120,8 @@ public:
 
     // operation in rowsets
     Status add_rowset(const RowsetSharedPtr& rowset, bool need_persist = true);
-    void modify_rowsets(const vector<RowsetSharedPtr>& to_add, const vector<RowsetSharedPtr>& to_delete);
+    void modify_rowsets(const vector<RowsetSharedPtr>& to_add, const vector<RowsetSharedPtr>& to_delete,
+                        std::vector<RowsetSharedPtr>* to_replace);
 
     // _rs_version_map and _inc_rs_version_map should be protected by _meta_lock
     // The caller must call hold _meta_lock when call this two function.
@@ -127,6 +129,25 @@ public:
     RowsetSharedPtr get_inc_rowset_by_version(const Version& version) const;
 
     RowsetSharedPtr rowset_with_max_version() const;
+
+    bool binlog_enable();
+
+    // The process to generate binlog when publishing a rowset. These methods are protected by _meta_lock
+    // prepare_binlog_if_needed: persist the binlog file before saving the rowset meta in add_inc_rowset()
+    //              but the in-memory binlog meta in BinlogManager is not modified, so the binlog
+    //              is not visible
+    // commit_binlog: if successful to save rowset meta in add_inc_rowset(), make the newly binlog
+    //              file visible. commit_binlog is expected to be always successful because it just
+    //              modifies the in-memory binlog metas
+    // abort_binlog: if failed to save rowset meta, clean up the binlog file generated in
+    //              prepare_binlog
+
+    // Prepare the binlog if needed. Return false if no need to prepare binlog, such as the binlog
+    // is disabled, otherwise will prepare the binlog. true will be returned if prepare successfully,
+    // other status if error happens during preparation.
+    StatusOr<bool> prepare_binlog_if_needed(const RowsetSharedPtr& rowset, int64_t version);
+    void commit_binlog(int64_t version);
+    void abort_binlog(const RowsetSharedPtr& rowset, int64_t version);
 
     Status add_inc_rowset(const RowsetSharedPtr& rowset, int64_t version);
     void delete_expired_inc_rowsets();
@@ -235,7 +256,7 @@ public:
 
     // updatable tablet specific operations
     TabletUpdates* updates() { return _updates.get(); }
-    Status rowset_commit(int64_t version, const RowsetSharedPtr& rowset);
+    Status rowset_commit(int64_t version, const RowsetSharedPtr& rowset, uint32_t wait_time = 0);
 
     // if there is _compaction_task running
     // do not do compaction
@@ -264,9 +285,15 @@ public:
         return _tablet_meta->set_enable_persistent_index(enable_persistent_index);
     }
 
+    Status support_binlog();
+
     void set_binlog_config(TBinlogConfig binlog_config) { _tablet_meta->set_binlog_config(binlog_config); }
 
+    BinlogManager* binlog_manager() { return _binlog_manager == nullptr ? nullptr : _binlog_manager.get(); }
+
     Status contains_version(const Version& version);
+
+    void get_basic_info(TabletBasicInfo& info);
 
 protected:
     void on_shutdown() override;
@@ -285,8 +312,6 @@ private:
     void _delete_stale_rowset_by_version(const Version& version);
     Status _capture_consistent_rowsets_unlocked(const vector<Version>& version_path,
                                                 vector<RowsetSharedPtr>* rowsets) const;
-
-    bool _check_versions_completeness();
 
     friend class TabletUpdates;
     static const int64_t kInvalidCumulativePoint = -1;
@@ -349,6 +374,8 @@ private:
     std::atomic<int64_t> _cumulative_point{0};
     std::atomic<int32_t> _newly_created_rowset_num{0};
     std::atomic<int64_t> _last_checkpoint_time{0};
+
+    std::unique_ptr<BinlogManager> _binlog_manager;
 };
 
 inline bool Tablet::init_succeeded() {

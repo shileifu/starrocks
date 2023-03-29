@@ -90,7 +90,7 @@ public class DatabaseTest {
 
                 GlobalStateMgr.getCurrentStateJournalVersion();
                 minTimes = 0;
-                result = FeConstants.meta_version;
+                result = FeConstants.META_VERSION;
 
                 globalStateMgr.getClusterId();
                 minTimes = 0;
@@ -227,5 +227,20 @@ public class DatabaseTest {
         // 3. delete files
         dis.close();
         file.delete();
+    }
+
+    @Test
+    public void testGetUUID() {
+        // Internal database
+        Database db1 = new Database();
+        Assert.assertEquals("0", db1.getUUID());
+
+        Database db2 = new Database(101, "db2");
+        Assert.assertEquals("101", db2.getUUID());
+
+        // External database
+        Database db3 = new Database(101, "db3");
+        db3.setCatalogName("hive");
+        Assert.assertEquals("hive.db3", db3.getUUID());
     }
 }

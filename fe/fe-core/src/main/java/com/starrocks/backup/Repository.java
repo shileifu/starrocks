@@ -47,7 +47,7 @@ import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 import com.starrocks.common.util.TimeUtils;
 import com.starrocks.server.GlobalStateMgr;
-import com.starrocks.system.Backend;
+import com.starrocks.system.DataNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -541,7 +541,7 @@ public class Repository implements Writable {
 
     public Status getBrokerAddress(Long beId, GlobalStateMgr globalStateMgr, List<FsBroker> brokerAddrs) {
         // get backend
-        Backend be = GlobalStateMgr.getCurrentSystemInfo().getBackend(beId);
+        DataNode be = GlobalStateMgr.getCurrentSystemInfo().getBackend(beId);
         if (be == null) {
             return new Status(ErrCode.COMMON_ERROR, "backend " + beId + " is missing. "
                     + "failed to send upload snapshot task");
@@ -572,23 +572,26 @@ public class Repository implements Writable {
         info.add(String.valueOf(isReadOnly));
         info.add(location);
         info.add(storage.getBrokerName());
-        info.add(errMsg == null ? FeConstants.null_string : errMsg);
+        info.add(errMsg == null ? FeConstants.NULL_STRING : errMsg);
         return info;
     }
 
-    public List<List<String>> getSnapshotInfos(String snapshotName, String timestamp)
+    public List<List<String>> getSnapshotInfos(String snapshotName, String timestamp, List<String> snapshotNames)
             throws AnalysisException {
         List<List<String>> snapshotInfos = Lists.newArrayList();
         if (Strings.isNullOrEmpty(snapshotName)) {
             // get all snapshot infos
-            List<String> snapshotNames = Lists.newArrayList();
-            Status status = listSnapshots(snapshotNames);
+            List<String> fullSnapshotNames = Lists.newArrayList();
+            Status status = listSnapshots(fullSnapshotNames);
             if (!status.ok()) {
                 throw new AnalysisException(
                         "Failed to list snapshot in repo: " + name + ", err: " + status.getErrMsg());
             }
 
-            for (String ssName : snapshotNames) {
+            for (String ssName : fullSnapshotNames) {
+                if (snapshotNames != null && snapshotNames.size() != 0 && !snapshotNames.contains(ssName)) {
+                    continue;
+                }
                 List<String> info = getSnapshotInfo(ssName, null /* get all timestamp */);
                 snapshotInfos.add(info);
             }
@@ -612,7 +615,7 @@ public class Repository implements Writable {
             Status st = storage.list(infoFilePath + "*", results);
             if (!st.ok()) {
                 info.add(snapshotName);
-                info.add(FeConstants.null_string);
+                info.add(FeConstants.NULL_STRING);
                 info.add("ERROR: Failed to get info: " + st.getErrMsg());
             } else {
                 info.add(snapshotName);
@@ -641,8 +644,8 @@ public class Repository implements Writable {
                 if (!st.ok()) {
                     info.add(snapshotName);
                     info.add(timestamp);
-                    info.add(FeConstants.null_string);
-                    info.add(FeConstants.null_string);
+                    info.add(FeConstants.NULL_STRING);
+                    info.add(FeConstants.NULL_STRING);
                     info.add("Failed to get info: " + st.getErrMsg());
                 } else {
                     try {
@@ -655,8 +658,8 @@ public class Repository implements Writable {
                     } catch (IOException e) {
                         info.add(snapshotName);
                         info.add(timestamp);
-                        info.add(FeConstants.null_string);
-                        info.add(FeConstants.null_string);
+                        info.add(FeConstants.NULL_STRING);
+                        info.add(FeConstants.NULL_STRING);
                         info.add("Failed to read info from local file: " + e.getMessage());
                     }
                 }
@@ -697,5 +700,24 @@ public class Repository implements Writable {
         location = Text.readString(in);
         storage = BlobStorage.read(in);
         createTime = in.readLong();
+
+        if (!GlobalStateMgr.isCheckpointThread()) {
+            // check __palo_repository_ first, if success, prefixRepo = __palo_repository_
+            String listPath = Joiner.on(PATH_DELIMITER).join(location, joinPrefix("__palo_repository_", name));
+            Status st;
+            try {
+                st = storage.checkPathExist(listPath);
+            } catch (Exception e) {
+                LOG.warn("check path exist fail");
+                prefixRepo = "__starrocks_repository_";
+                return;
+            }
+
+            if (st.ok()) {
+                prefixRepo = "__palo_repository_";
+            } else {
+                prefixRepo = "__starrocks_repository_";
+            }
+        }
     }
 }

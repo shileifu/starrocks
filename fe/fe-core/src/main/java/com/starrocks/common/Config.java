@@ -211,6 +211,20 @@ public class Config extends ConfigBase {
     public static String big_query_log_delete_age = "7d";
 
     /**
+     * Log the COSTS plan, if the query is cancelled due to a crash of the backend or RpcException.
+     * It is only effective when enable_collect_query_detail_info is set to false, since the plan will be recorded
+     * in the query detail when enable_collect_query_detail_info is true.
+     */
+    @ConfField(mutable = true)
+    public static boolean log_plan_cancelled_by_crash_be = true;
+
+    /**
+     * Used to limit the maximum number of partitions that can be created when creating a dynamic partition table,
+     * to avoid creating too many partitions at one time.
+     */
+    @ConfField(mutable = true) public static int max_dynamic_partition_num = 500;
+
+    /**
      * plugin_dir:
      * plugin install directory
      */
@@ -442,6 +456,13 @@ public class Config extends ConfigBase {
      */
     @ConfField
     public static int bdbje_replay_cost_percent = 150;
+
+    /**
+     * For the version of 5.7, bdb-je will reserve unprotected files (which can be deleted safely) as much as possible,
+     * this param (default is 0 in bdb-je, which means unlimited) controls the limit of reserved unprotected files.
+     */
+    @ConfField
+    public static long bdbje_reserved_disk_size = 512L * 1024 * 1024;
 
     /**
      * the max txn number which bdbje can rollback when trying to rejoin the group
@@ -1003,6 +1024,14 @@ public class Config extends ConfigBase {
     public static long dynamic_partition_check_interval_seconds = 600;
 
     /**
+     * If batch creation of partitions is allowed to create half of the partitions, it is easy to generate holes.
+     * By default, this is not enabled. If it is turned on, the partitions built by batch creation syntax will
+     * not allow partial creation.
+     */
+    @ConfField(mutable = true)
+    public static boolean enable_create_partial_partition_in_batch = false;
+
+    /**
      * The number of query retries.
      * A query may retry if we encounter RPC exception and no result has been sent to user.
      * You may reduce this number to avoid Avalanche disaster.
@@ -1388,6 +1417,13 @@ public class Config extends ConfigBase {
     public static String authentication_kerberos_service_key_tab = "";
 
     /**
+     * When set to true, we cannot drop user named 'admin' or grant/revoke role to/from user named 'admin',
+     * except that we're root user.
+     */
+    @ConfField(mutable = true)
+    public static boolean authorization_enable_admin_user_protection = false;
+
+    /**
      * In some cases, some tablets may have all replicas damaged or lost.
      * At this time, the data has been lost, and the damaged tablets
      * will cause the entire query to fail, and the remaining healthy tablets cannot be queried.
@@ -1467,6 +1503,8 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true)
     public static long statistic_update_interval_sec = 24L * 60L * 60L;
 
+    @ConfField(mutable = true)
+    public static long statistic_collect_too_many_version_sleep = 600000; // 10min
     /**
      * Enable full statistics collection
      */
@@ -1478,6 +1516,17 @@ public class Config extends ConfigBase {
      */
     @ConfField(mutable = true)
     public static double statistic_auto_collect_ratio = 0.8;
+
+    // If the health in statistic_full_collect_interval is lower than this value,
+    // choose collect sample statistics first
+    @ConfField(mutable = true)
+    public static double statistic_auto_sample_ratio = 0.3;
+
+    @ConfField(mutable = true)
+    public static long statistic_auto_sample_data_size = 100L * 1024 * 1024 * 1024; // 100G
+
+    @ConfField(mutable = true)
+    public static long statistic_auto_collect_interval = 3600L * 12; // unit: second, default 12h
 
     /**
      * Full statistics collection max data size
@@ -1550,6 +1599,12 @@ public class Config extends ConfigBase {
     public static long max_partitions_in_one_batch = 4096;
 
     /**
+     * Used to limit num of partition for automatic partition table automatically created
+     */
+    @ConfField(mutable = true)
+    public static long max_automatic_partition_number = 4096;
+
+    /**
      * Used to limit num of agent task for one be. currently only for drop task.
      */
     @ConfField(mutable = true)
@@ -1589,7 +1644,7 @@ public class Config extends ConfigBase {
      * The maximum number of partitions to fetch from the metastore in one RPC.
      */
     @ConfField
-    public static int max_hive_partitions_per_rpc = 1000;
+    public static int max_hive_partitions_per_rpc = 5000;
 
     /**
      * The interval of lazy refreshing remote file's metadata cache
@@ -1640,17 +1695,42 @@ public class Config extends ConfigBase {
     public static int hms_process_events_parallel_num = 4;
 
     /**
-     * Metastore event processor refresh table column statistic interval in seconds.
-     */
-    @ConfField(mutable = true)
-    public static int hms_refresh_columns_statistic_interval_s = 600;
-
-    /**
      * Used to split files stored in dfs such as object storage
      * or hdfs into smaller files for hive external table
      */
     @ConfField(mutable = true)
     public static long hive_max_split_size = 64L * 1024L * 1024L;
+
+    /**
+     * Enable background refresh all external tables all partitions metadata on internal catalog.
+     */
+    @ConfField
+    public static boolean enable_background_refresh_connector_metadata = false;
+
+    /**
+     * Enable background refresh all external tables all partitions metadata based on resource in internal catalog.
+     */
+    @ConfField
+    public static boolean enable_background_refresh_resource_table_metadata = false;
+
+    /**
+     * Number of threads to refresh remote file's metadata concurrency.
+     */
+    @ConfField
+    public static int background_refresh_file_metadata_concurrency = 4;
+
+    /**
+     * Background refresh hive external table metadata interval in milliseconds.
+     */
+    @ConfField(mutable = true)
+    public static int background_refresh_metadata_interval_millis = 600000;
+
+    /**
+     * Enable refresh hive partition statistics.
+     * The `getPartitionColumnStats()` requests of hive metastore has a high latency, and some users env may return timeout.
+     */
+    @ConfField(mutable = true)
+    public static boolean enable_refresh_hive_partitions_statistics = true;
 
     /**
      * size of iceberg worker pool
@@ -1675,6 +1755,48 @@ public class Config extends ConfigBase {
      */
     @ConfField(mutable = true)
     public static int iceberg_table_refresh_expire_sec = 86400;
+
+    /**
+     * iceberg metadata cache dir
+     */
+    @ConfField(mutable = true)
+    public static String iceberg_metadata_cache_disk_path = StarRocksFE.STARROCKS_HOME_DIR + "/caches/iceberg";
+
+    /**
+     * iceberg metadata memory cache total size, default 512MB
+     */
+    @ConfField(mutable = true)
+    public static long iceberg_metadata_memory_cache_capacity = 536870912L;
+
+    /**
+     * iceberg metadata memory cache expiration time, default 86500s
+     */
+    @ConfField(mutable = true)
+    public static long iceberg_metadata_memory_cache_expiration_seconds = 86500;
+
+    /**
+     * enable iceberg metadata disk cache, default false
+     */
+    @ConfField(mutable = true)
+    public static boolean enable_iceberg_metadata_disk_cache = false;
+
+    /**
+     * iceberg metadata disk cache total size, default 2GB
+     */
+    @ConfField(mutable = true)
+    public static long iceberg_metadata_disk_cache_capacity = 2147483648L;
+
+    /**
+     * iceberg metadata disk cache expire after access
+     */
+    @ConfField
+    public static long iceberg_metadata_disk_cache_expiration_seconds = 7L * 24L * 60L * 60L;
+
+    /**
+     * iceberg metadata cache max entry size, default 8MB
+     */
+    @ConfField(mutable = true)
+    public static long iceberg_metadata_cache_max_entry_size = 8388608L;
 
     /**
      * fe will call es api to get es index shard info every es_state_sync_interval_secs
@@ -1752,31 +1874,12 @@ public class Config extends ConfigBase {
     public static int heartbeat_retry_times = 3;
 
     /**
-     * Temporary use, it will be removed later.
-     * Set true if using StarOS to manage tablets for StarRocks lake table.
+     * shared_data: means run on cloud-native
+     * shared_nothing: means run on local
+     * hybrid: run on both, not production ready, should only be used in test environment now.
      */
     @ConfField
-    public static boolean use_staros = false;
-    @ConfField
-    public static String starmgr_address = "127.0.0.1:6090";
-    @ConfField
-    public static boolean integrate_starmgr = false;
-    @ConfField
-    public static String starmgr_s3_bucket = "";
-    @ConfField
-    public static String starmgr_s3_region = "";
-    @ConfField
-    public static String starmgr_s3_endpoint = "";
-    @ConfField
-    public static String starmgr_aws_credential_type = "simple";
-    @ConfField
-    public static String starmgr_simple_credential_access_key_id = "";
-    @ConfField
-    public static String starmgr_simple_credential_access_key_secret = "";
-    @ConfField
-    public static String starmgr_assume_role_credential_arn = "";
-    @ConfField
-    public static String starmgr_assume_role_credential_external_id = "";
+    public static String run_mode = "shared_nothing";
 
     /**
      * empty shard group clean threshold (by create time).
@@ -1790,18 +1893,59 @@ public class Config extends ConfigBase {
     @ConfField
     public static long shard_deleter_run_interval_sec = 600L;
 
-    @ConfField
-    public static String hdfs_url = "";
-
-    /* default file store type used */
-    @ConfField
-    public static String default_fs_type = "S3";
-
+    // ***********************************************************
+    // * BEGIN: Cloud native meta server related configurations
+    // ***********************************************************
     /**
-     * starmgr disable auto shard balance or not
+     * Cloud native meta server rpc listen port
      */
     @ConfField
-    public static boolean starmgr_disable_shard_balance = false;
+    public static int cloud_native_meta_port = 6090;
+    // remote storage related configuration
+    /**
+     * storage type for cloud native table. Available options: "S3", "HDFS", case-sensitive
+     */
+    @ConfField
+    public static String cloud_native_storage_type = "S3";
+
+    // HDFS storage configuration
+    /**
+     * cloud native storage: hdfs storage url
+     */
+    @ConfField
+    public static String cloud_native_hdfs_url = "";
+
+    // AWS S3 storage configuration
+    @ConfField
+    public static String aws_s3_path = "";
+    @ConfField
+    public static String aws_s3_region = "";
+    @ConfField
+    public static String aws_s3_endpoint = "";
+
+    // AWS credential configuration
+    @ConfField
+    public static boolean aws_s3_use_aws_sdk_default_behavior = false;
+    @ConfField
+    public static boolean aws_s3_use_instance_profile = false;
+
+    @ConfField
+    public static String aws_s3_access_key = "";
+    @ConfField
+    public static String aws_s3_secret_key = "";
+
+    @ConfField
+    public static String aws_s3_iam_role_arn = "";
+    @ConfField
+    public static String aws_s3_external_id = "";
+
+    // Enables or disables SSL connections to AWS services. Not support for now
+    // @ConfField
+    // public static String aws_s3_enable_ssl = "true";
+    
+    // ***********************************************************
+    // * END: of Cloud native meta server related configurations
+    // ***********************************************************
 
     /**
      * default storage cache ttl of lake table
@@ -1810,10 +1954,14 @@ public class Config extends ConfigBase {
     public static long lake_default_storage_cache_ttl_seconds = 2592000L;
 
     @ConfField(mutable = true)
-    public static boolean enable_experimental_mv = false;
+    public static boolean enable_experimental_mv = true;
 
+    /**
+     * Each automatic partition will create a hidden partition, which is not displayed to the user by default.
+     * Sometimes this display can be enabled to check problems.
+     */
     @ConfField(mutable = true)
-    public static boolean enable_expression_partition = false;
+    public static boolean enable_display_shadow_partitions = false;
 
     @ConfField
     public static boolean enable_dict_optimize_routine_load = false;
@@ -1916,9 +2064,6 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true)
     public static String metadata_journal_skip_bad_journal_ids = "";
 
-    @ConfField(mutable = true)
-    public static boolean recursive_dir_search_enabled = true;
-
     /**
      * Number of profile infos reserved by `ProfileManager` for recently executed query.
      * Default value: 500
@@ -1999,4 +2144,16 @@ public class Config extends ConfigBase {
      **/
     @ConfField(mutable = true)
     public static boolean enable_auto_tablet_distribution = false;
+
+    /**
+     * default size of minimum cache size of auto increment id allocation
+     **/
+    @ConfField(mutable = true)
+    public static long auto_increment_cache_size = 100000;
+
+    /**
+     * Enable the experimental temporary table feature
+     */
+    @ConfField(mutable = true)
+    public static boolean enable_experimental_temporary_table = false;
 }

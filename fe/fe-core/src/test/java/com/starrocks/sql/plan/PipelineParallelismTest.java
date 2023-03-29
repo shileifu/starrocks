@@ -19,7 +19,7 @@ import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
 import com.starrocks.planner.PlanFragment;
 import com.starrocks.sql.ast.StatementBase;
-import com.starrocks.system.BackendCoreStat;
+import com.starrocks.system.DataNodeCoreStat;
 import com.starrocks.thrift.TExplainLevel;
 import mockit.Mock;
 import mockit.MockUp;
@@ -29,7 +29,7 @@ import org.junit.Before;
 import org.junit.Test;
 
 public class PipelineParallelismTest extends PlanTestBase {
-    private MockUp<BackendCoreStat> mockedBackendCoreStat = null;
+    private MockUp<DataNodeCoreStat> mockedBackendCoreStat = null;
     private final int parallelExecInstanceNum = 16;
     private final int numHardwareCores = 8;
     private int prevParallelExecInstanceNum = 0;
@@ -38,7 +38,7 @@ public class PipelineParallelismTest extends PlanTestBase {
 
     @Before
     public void setUp() {
-        mockedBackendCoreStat = new MockUp<BackendCoreStat>() {
+        mockedBackendCoreStat = new MockUp<DataNodeCoreStat>() {
             @Mock
             public int getAvgNumOfHardwareCoresOfBe() {
                 return numHardwareCores;
@@ -127,7 +127,7 @@ public class PipelineParallelismTest extends PlanTestBase {
             assertContains(fragment0.getExplainString(TExplainLevel.NORMAL), "OLAP TABLE SINK");
             // ParallelExecNum of fragment not 1. still can not use pipeline
             Assert.assertEquals(1, fragment0.getParallelExecNum());
-            Assert.assertEquals(numHardwareCores / 2, fragment0.getPipelineDop());
+            Assert.assertEquals(numHardwareCores / 3, fragment0.getPipelineDop());
         } finally {
             Config.enable_pipeline_load = prevEnablePipelineLoad;
         }
@@ -165,7 +165,7 @@ public class PipelineParallelismTest extends PlanTestBase {
             assertContains(fragment0.getExplainString(TExplainLevel.NORMAL), "OLAP TABLE SINK");
             // enable pipeline_load by Config, so ParallelExecNum of fragment is set to 1.
             Assert.assertEquals(1, fragment0.getParallelExecNum());
-            Assert.assertEquals(numHardwareCores / 2, fragment0.getPipelineDop());
+            Assert.assertEquals(numHardwareCores / 3, fragment0.getPipelineDop());
         } finally {
             Config.enable_pipeline_load = prevEnablePipelineLoad;
         }
@@ -203,7 +203,7 @@ public class PipelineParallelismTest extends PlanTestBase {
             assertContains(fragment0.getExplainString(TExplainLevel.NORMAL), "OLAP TABLE SINK");
             // enable pipeline_load by Config, so ParallelExecNum of fragment is set to 1.
             Assert.assertEquals(1, fragment0.getParallelExecNum());
-            Assert.assertEquals(numHardwareCores / 2, fragment0.getPipelineDop());
+            Assert.assertEquals(numHardwareCores / 3, fragment0.getPipelineDop());
         } finally {
             Config.enable_pipeline_load = prevEnablePipelineLoad;
         }

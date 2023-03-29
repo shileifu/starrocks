@@ -88,6 +88,27 @@ public class AggregateFunction extends Function {
     // function. e.g. org.example.MyUdf.class.
     private String symbolName;
 
+    public List<Boolean> getIsAscOrder() {
+        return isAscOrder;
+    }
+
+    public void setIsAscOrder(List<Boolean> isAscOrder) {
+        this.isAscOrder = isAscOrder;
+    }
+
+    private List<Boolean> isAscOrder;
+
+    public List<Boolean> getNullsFirst() {
+        return nullsFirst;
+    }
+
+    public void setNullsFirst(List<Boolean> nullsFirst) {
+        this.nullsFirst = nullsFirst;
+    }
+
+    // True if "NULLS FIRST", false if "NULLS LAST", null if not specified.
+    private List<Boolean> nullsFirst;
+
     // only used for serialization
     protected AggregateFunction() {
     }
@@ -163,6 +184,16 @@ public class AggregateFunction extends Function {
         returnsNonNullOnEmpty = false;
     }
 
+    public AggregateFunction(AggregateFunction other) {
+        super(other);
+        intermediateType = other.intermediateType;
+        ignoresDistinct = other.ignoresDistinct;
+        isAnalyticFn = other.isAnalyticFn;
+        isAggregateFn = other.isAggregateFn;
+        returnsNonNullOnEmpty = other.returnsNonNullOnEmpty;
+        symbolName = other.symbolName;
+    }
+
     public String getSymbolName() {
         return symbolName == null ? Strings.EMPTY : symbolName;
     }
@@ -224,6 +255,10 @@ public class AggregateFunction extends Function {
         public AggregateFunctionBuilder symbolName(String symbolName) {
             this.symbolName = symbolName;
             return this;
+        }
+
+        public void setIntermediateType(Type intermediateType) {
+            this.intermediateType = intermediateType;
         }
 
         public AggregateFunction build() {
@@ -288,6 +323,12 @@ public class AggregateFunction extends Function {
         } else {
             aggFn.setIntermediate_type(getReturnType().toThrift());
         }
+        if (isAscOrder != null && !isAscOrder.isEmpty()) {
+            aggFn.setIs_asc_order(isAscOrder);
+        }
+        if (nullsFirst != null && !nullsFirst.isEmpty()) {
+            aggFn.setNulls_first(nullsFirst);
+        }
         aggFn.setSymbol(getSymbolName());
         fn.setAggregate_fn(aggFn);
         return fn;
@@ -347,6 +388,11 @@ public class AggregateFunction extends Function {
         properties.put(CreateFunctionStmt.SYMBOL_KEY, symbolName == null ? "" : symbolName);
         properties.put(CreateFunctionStmt.TYPE_KEY, getBinaryType().name());
         return new Gson().toJson(properties);
+    }
+
+    @Override
+    public Function copy() {
+        return new AggregateFunction(this);
     }
 }
 

@@ -42,6 +42,7 @@ import com.starrocks.common.util.LoadPriority;
 import com.starrocks.common.util.TimeUtils;
 import com.starrocks.load.EtlJobType;
 import com.starrocks.load.Load;
+import com.starrocks.sql.parser.NodePosition;
 
 import java.util.List;
 import java.util.Map;
@@ -66,6 +67,15 @@ import java.util.Map.Entry;
 //          INTO TABLE tbl_name
 //          [PARTITION (p1, p2)]
 //          [COLUMNS TERMINATED BY separator ]
+//          [FORMAT AS CSV]
+//          [
+//              (
+//                  "trim_space"="xx",
+//                  "enclose"="x",
+//                  "escape"="x",
+//                  "skip_header"="2"
+//              )
+//          ]
 //          [(col1, ...)]
 //          [SET (k1=f1(xx), k2=f2(xx))]
 //
@@ -88,6 +98,8 @@ public class LoadStmt extends DdlStmt {
     public static final String PARTIAL_UPDATE = "partial_update";
     public static final String PRIORITY = "priority";
     public static final String MERGE_CONDITION = "merge_condition";
+    public static final String CASE_SENSITIVE = "case_sensitive";
+
 
     // for load data from Baidu Object Store(BOS)
     public static final String BOS_ENDPOINT = "bos_endpoint";
@@ -125,10 +137,17 @@ public class LoadStmt extends DdlStmt {
             .add(TIMEZONE)
             .add(PARTIAL_UPDATE)
             .add(PRIORITY)
+            .add(CASE_SENSITIVE)
             .build();
 
-    public LoadStmt(LabelName label, List<DataDescription> dataDescriptions,
-                    BrokerDesc brokerDesc, String cluster, Map<String, String> properties) {
+    public LoadStmt(LabelName label, List<DataDescription> dataDescriptions, BrokerDesc brokerDesc,
+                    String cluster, Map<String, String> properties) {
+        this(label, dataDescriptions, brokerDesc, cluster, properties, NodePosition.ZERO);
+    }
+
+    public LoadStmt(LabelName label, List<DataDescription> dataDescriptions, BrokerDesc brokerDesc,
+                    String cluster, Map<String, String> properties, NodePosition pos) {
+        super(pos);
         this.label = label;
         this.dataDescriptions = dataDescriptions;
         this.brokerDesc = brokerDesc;
@@ -138,8 +157,14 @@ public class LoadStmt extends DdlStmt {
         this.user = null;
     }
 
-    public LoadStmt(LabelName label, List<DataDescription> dataDescriptions,
-                    ResourceDesc resourceDesc, Map<String, String> properties) {
+    public LoadStmt(LabelName label, List<DataDescription> dataDescriptions, ResourceDesc resourceDesc,
+                    Map<String, String> properties) {
+        this(label, dataDescriptions, resourceDesc, properties, NodePosition.ZERO);
+    }
+
+    public LoadStmt(LabelName label, List<DataDescription> dataDescriptions, ResourceDesc resourceDesc,
+                    Map<String, String> properties, NodePosition pos) {
+        super(pos);
         this.label = label;
         this.dataDescriptions = dataDescriptions;
         this.brokerDesc = null;

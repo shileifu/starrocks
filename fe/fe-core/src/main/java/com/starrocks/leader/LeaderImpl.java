@@ -67,6 +67,7 @@ import com.starrocks.catalog.TabletInvertedIndex;
 import com.starrocks.catalog.TabletMeta;
 import com.starrocks.common.Config;
 import com.starrocks.common.MetaNotFoundException;
+import com.starrocks.common.Pair;
 import com.starrocks.common.UserException;
 import com.starrocks.lake.LakeTablet;
 import com.starrocks.load.DeleteJob;
@@ -76,7 +77,7 @@ import com.starrocks.persist.ReplicaPersistInfo;
 import com.starrocks.rpc.FrontendServiceProxy;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.service.FrontendOptions;
-import com.starrocks.system.Backend;
+import com.starrocks.system.DataNode;
 import com.starrocks.task.AgentTask;
 import com.starrocks.task.AgentTaskQueue;
 import com.starrocks.task.AlterReplicaTask;
@@ -86,6 +87,7 @@ import com.starrocks.task.CloneTask;
 import com.starrocks.task.CreateReplicaTask;
 import com.starrocks.task.DirMoveTask;
 import com.starrocks.task.DownloadTask;
+import com.starrocks.task.DropAutoIncrementMapTask;
 import com.starrocks.task.PublishVersionTask;
 import com.starrocks.task.PushTask;
 import com.starrocks.task.SnapshotTask;
@@ -180,7 +182,7 @@ public class LeaderImpl {
         TBackend tBackend = request.getBackend();
         String host = tBackend.getHost();
         int bePort = tBackend.getBe_port();
-        Backend backend = GlobalStateMgr.getCurrentSystemInfo().getBackendWithBePort(host, bePort);
+        DataNode backend = GlobalStateMgr.getCurrentSystemInfo().getBackendWithBePort(host, bePort);
         if (backend == null) {
             tStatus.setStatus_code(TStatusCode.CANCELLED);
             List<String> errorMsgs = new ArrayList<>();
@@ -218,7 +220,8 @@ public class LeaderImpl {
                 if (taskType != TTaskType.MAKE_SNAPSHOT && taskType != TTaskType.UPLOAD
                         && taskType != TTaskType.DOWNLOAD && taskType != TTaskType.MOVE
                         && taskType != TTaskType.CLONE && taskType != TTaskType.PUBLISH_VERSION
-                        && taskType != TTaskType.CREATE && taskType != TTaskType.UPDATE_TABLET_META_INFO) {
+                        && taskType != TTaskType.CREATE && taskType != TTaskType.UPDATE_TABLET_META_INFO
+                        && taskType != TTaskType.DROP_AUTO_INCREMENT_MAP) {
                     return result;
                 }
             }
@@ -277,6 +280,9 @@ public class LeaderImpl {
                     break;
                 case UPDATE_TABLET_META_INFO:
                     finishUpdateTabletMeta(task, request);
+                    break;
+                case DROP_AUTO_INCREMENT_MAP:
+                    finishDropAutoIncrementMapTask(task, request);
                     break;
                 default:
                     break;
@@ -763,6 +769,22 @@ public class LeaderImpl {
         }
     }
 
+    private void finishDropAutoIncrementMapTask(AgentTask task, TFinishTaskRequest request) {
+        try {
+            DropAutoIncrementMapTask dropAutoIncrementMapTask = (DropAutoIncrementMapTask) task;
+            if (request.getTask_status().getStatus_code() != TStatusCode.OK) {
+                dropAutoIncrementMapTask.countDownToZero(
+                        task.getBackendId() + ": " + request.getTask_status().getError_msgs().toString());
+            } else {
+                dropAutoIncrementMapTask.countDownLatch(task.getBackendId());
+                LOG.debug("finish drop auto increment map. table id: {}, be: {}",
+                        dropAutoIncrementMapTask.tableId(), task.getBackendId());
+            }
+        } finally {
+            AgentTaskQueue.removeTask(task.getBackendId(), TTaskType.DROP_AUTO_INCREMENT_MAP, task.getSignature());
+        }
+    }
+
     private void finishRecoverTablet(AgentTask task) {
         AgentTaskQueue.removeTask(task.getBackendId(), TTaskType.RECOVER_TABLET, task.getSignature());
     }
@@ -897,7 +919,7 @@ public class LeaderImpl {
 
             TPartitionInfo tPartitionInfo = new TPartitionInfo();
             tPartitionInfo.setType(partitionInfo.getType().toThrift());
-            if (partitionInfo.getType() == PartitionType.RANGE) {
+            if (partitionInfo.isRangePartition()) {
                 TRangePartitionDesc rangePartitionDesc = new TRangePartitionDesc();
                 RangePartitionInfo rangePartitionInfo = (RangePartitionInfo) partitionInfo;
                 for (Column column : rangePartitionInfo.getPartitionColumns()) {
@@ -1023,7 +1045,7 @@ public class LeaderImpl {
             }
 
             List<TBackendMeta> backends = new ArrayList<>();
-            for (Backend backend : GlobalStateMgr.getCurrentState().getCurrentSystemInfo().getBackends()) {
+            for (DataNode backend : GlobalStateMgr.getCurrentState().getCurrentSystemInfo().getBackends()) {
                 TBackendMeta backendMeta = new TBackendMeta();
                 backendMeta.setBackend_id(backend.getId());
                 backendMeta.setHost(backend.getHost());
@@ -1049,9 +1071,8 @@ public class LeaderImpl {
     }
 
     public TNetworkAddress masterAddr() {
-        String masterHost = GlobalStateMgr.getCurrentState().getLeaderIp();
-        int masterRpcPort = GlobalStateMgr.getCurrentState().getLeaderRpcPort();
-        return new TNetworkAddress(masterHost, masterRpcPort);
+        Pair<String, Integer> ipAndPort = GlobalStateMgr.getCurrentState().getLeaderIpAndRpcPort();
+        return new TNetworkAddress(ipAndPort.first, ipAndPort.second);
     }
 
     public TBeginRemoteTxnResponse beginRemoteTxn(TBeginRemoteTxnRequest request) throws TException {

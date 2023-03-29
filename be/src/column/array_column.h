@@ -153,7 +153,7 @@ public:
         return _elements->container_memory_usage() + _offsets->container_memory_usage();
     }
 
-    size_t element_memory_usage(size_t from, size_t size) const override;
+    size_t reference_memory_usage(size_t from, size_t size) const override;
 
     void swap_column(Column& rhs) override;
 
@@ -161,6 +161,7 @@ public:
 
     const Column& elements() const { return *_elements; }
     ColumnPtr& elements_column() { return _elements; }
+    ColumnPtr elements_column() const { return _elements; }
 
     const UInt32Column& offsets() const { return *_offsets; }
     UInt32Column::Ptr& offsets_column() { return _offsets; }
@@ -183,13 +184,10 @@ public:
 
     void check_or_die() const override;
 
-    // null map is null, but the corresponding array may not empty, so need empty the unexpected array.
-    bool empty_null_array(const NullColumnPtr& null_map);
-
     Status unfold_const_children(const starrocks::TypeDescriptor& type) override;
 
 private:
-    // _elements must be NullableColumn
+    // Elements must be NullableColumn to facilitate handling nested types.
     ColumnPtr _elements;
     // Offsets column will store the start position of every array element.
     // Offsets store more one data to indicate the end position.

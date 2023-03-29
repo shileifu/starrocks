@@ -14,10 +14,11 @@
 
 #pragma once
 #include "formats/parquet/column_converter.h"
+#include "gen_cpp/PlanNodes_types.h"
+#include "io/shared_buffered_input_stream.h"
 
 namespace starrocks {
 class RandomAccessFile;
-class SharedBufferedInputStream;
 struct HdfsScanStats;
 } // namespace starrocks
 
@@ -36,7 +37,7 @@ struct ColumnReaderOptions {
     int chunk_size = 0;
     HdfsScanStats* stats = nullptr;
     RandomAccessFile* file = nullptr;
-    SharedBufferedInputStream* sb_stream = nullptr;
+    io::SharedBufferedInputStream* sb_stream = nullptr;
     tparquet::RowGroup* row_group_meta = nullptr;
     ColumnReaderContext* context = nullptr;
 };
@@ -46,7 +47,11 @@ public:
     // TODO(zc): review this,
     // create a column reader
     static Status create(const ColumnReaderOptions& opts, const ParquetField* field, const TypeDescriptor& col_type,
-                         std::unique_ptr<ColumnReader>* reader);
+                         std::unique_ptr<ColumnReader>* output);
+
+    // Create with iceberg schema
+    static Status create(const ColumnReaderOptions& opts, const ParquetField* field, const TypeDescriptor& col_type,
+                         const TIcebergSchemaField* iceberg_schema_field, std::unique_ptr<ColumnReader>* output);
 
     virtual ~ColumnReader() = default;
 
@@ -60,6 +65,8 @@ public:
 
     virtual void get_levels(level_t** def_levels, level_t** rep_levels, size_t* num_levels) = 0;
 
+    virtual void set_need_parse_levels(bool need_parse_levels) = 0;
+
     virtual Status get_dict_values(Column* column) { return Status::NotSupported("get_dict_values is not supported"); }
 
     virtual Status get_dict_values(const std::vector<int32_t>& dict_codes, Column* column) {
@@ -70,7 +77,6 @@ public:
         return Status::NotSupported("get_dict_codes is not supported");
     }
 
-public:
     std::unique_ptr<ColumnConverter> converter;
 };
 

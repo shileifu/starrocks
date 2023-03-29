@@ -36,17 +36,17 @@ public class AnalyzeAggregateTest {
         analyzeFail("select v1 from t0 where abs(sum(v2)) = 2;",
                 "WHERE clause cannot contain aggregations");
         analyzeFail("select sum(v1) from t0 order by sum(max(v2) over ())",
-                "Cannot nest window function inside aggregation");
+                "Unsupported nest window function inside aggregation.");
         analyzeFail("select sum(v1) from t0 order by sum(abs(max(v2) over ()))",
-                "Cannot nest window function inside aggregation");
+                "Unsupported nest window function inside aggregation.");
         analyzeFail("select sum(v1) from t0 order by sum(max(v2))",
-                "Cannot nest aggregations inside aggregation");
+                "Unsupported nest window function inside aggregation.");
         analyzeFail("select sum(v1) from t0 order by sum(abs(max(v2)))",
-                "Cannot nest aggregations inside aggregation");
+                "Unsupported nest window function inside aggregation.");
         analyzeFail("select sum(max(v2)) from t0",
-                "Cannot nest aggregations inside aggregation");
+                "Unsupported nest window function inside aggregation.");
         analyzeFail("select sum(1 + max(v2)) from t0",
-                "Cannot nest aggregations inside aggregation");
+                "Unsupported nest window function inside aggregation.");
 
         analyzeFail("select v1 from t0 group by v1,cast(v2 as int) having cast(v2 as boolean)",
                 "must be an aggregate expression or appear in GROUP BY clause");
@@ -63,13 +63,20 @@ public class AnalyzeAggregateTest {
         analyzeSuccess("select ta,tc from tall group by ta,tc having ta = user()");
 
         analyzeSuccess("select count() from t0");
-        
+
         analyzeSuccess("select max_by(v1,v2) from t0");
         analyzeFail("select max_by(v1) from t0", "No matching function with signature: max_by(bigint(20)).");
-        analyzeFail("select max_by(v1,v2,v3) from t0", 
+        analyzeFail("select max_by(v1,v2,v3) from t0",
                 "No matching function with signature: max_by(bigint(20), bigint(20), bigint(20)).");
         analyzeFail("select max_by(v1,1) from t0", "max_by function args must be column");
         analyzeFail("select max_by(1,v1) from t0", "max_by function args must be column");
+
+        analyzeSuccess("select min_by(v1,v2) from t0");
+        analyzeFail("select min_by(v1) from t0", "No matching function with signature: min_by(bigint(20)).");
+        analyzeFail("select min_by(v1,v2,v3) from t0",
+                "No matching function with signature: min_by(bigint(20), bigint(20), bigint(20)).");
+        analyzeFail("select min_by(v1,1) from t0", "min_by function args must be column");
+        analyzeFail("select min_by(1,v1) from t0", "min_by function args must be column");
     }
 
     @Test
@@ -79,7 +86,7 @@ public class AnalyzeAggregateTest {
 
         //The arguments to GROUPING must be expressions referenced by GROUP BY
         analyzeFail("select grouping(v3) from t0 group by grouping sets((v1), (v2))",
-                "The arguments to GROUPING must be expressions referenced by GROUP BY");
+                "The arguments of GROUPING must be expressions referenced by GROUP BY");
 
         //Grouping operations are not allowed in order by
         analyzeFail("select v1 from t0 group by v1 order by grouping(v1)",
@@ -170,8 +177,9 @@ public class AnalyzeAggregateTest {
         Assert.assertEquals("grouping(t0.v1, t0.v3), grouping(t0.v2)",
                 String.join(", ", query.getColumnOutputNames()));
 
-        query = ((QueryStatement) analyzeSuccess("select grouping_id(test.t0.v1, test.t0.v3), grouping(test.t0.v2) from t0 " +
-                "group by cube(test.t0.v1, test.t0.v2, test.t0.v3);"))
+        query = ((QueryStatement) analyzeSuccess(
+                "select grouping_id(test.t0.v1, test.t0.v3), grouping(test.t0.v2) from t0 " +
+                        "group by cube(test.t0.v1, test.t0.v2, test.t0.v3);"))
                 .getQueryRelation();
         Assert.assertEquals("grouping(test.t0.v1, test.t0.v3), grouping(test.t0.v2)",
                 String.join(", ", query.getColumnOutputNames()));
@@ -195,8 +203,9 @@ public class AnalyzeAggregateTest {
         Assert.assertEquals("v1, v2, grouping(t0.v1, t0.v2), sum(t0.v3)",
                 String.join(", ", query.getColumnOutputNames()));
 
-        query = ((QueryStatement) analyzeSuccess("select test.t0.v1, test.t0.v2, grouping_id(test.t0.v1, test.t0.v2), " +
-                "SUM(test.t0.v3) from t0 group by cube(test.t0.v1, test.t0.v2)"))
+        query = ((QueryStatement) analyzeSuccess(
+                "select test.t0.v1, test.t0.v2, grouping_id(test.t0.v1, test.t0.v2), " +
+                        "SUM(test.t0.v3) from t0 group by cube(test.t0.v1, test.t0.v2)"))
                 .getQueryRelation();
         Assert.assertEquals("v1, v2, grouping(test.t0.v1, test.t0.v2), sum(test.t0.v3)",
                 String.join(", ", query.getColumnOutputNames()));
@@ -212,4 +221,10 @@ public class AnalyzeAggregateTest {
     public void testAnyValueFunction() {
         analyzeSuccess("select v1, any_value(v2) from t0 group by v1");
     }
+
+    @Test
+    public void testPercentileDiscFunction() {
+        analyzeSuccess("select percentile_disc(tj,0.5) from tall group by tb");
+    }
+
 }

@@ -15,9 +15,9 @@
 
 package com.starrocks.scheduler;
 
-import com.clearspring.analytics.util.Lists;
-import com.clearspring.analytics.util.Preconditions;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.gson.annotations.SerializedName;
 import com.starrocks.catalog.Column;
@@ -123,7 +123,7 @@ public class TaskManager {
     private void registerPeriodicalTask() {
         for (Task task : nameToTaskMap.values()) {
             if (task.getType() != Constants.TaskType.PERIODICAL) {
-                return;
+                continue;
             }
 
             TaskSchedule taskSchedule = task.getSchedule();
@@ -311,8 +311,8 @@ public class TaskManager {
             return new SubmitResult(null, SubmitResult.SubmitStatus.FAILED);
         }
         return taskRunManager
-                .submitTaskRun(TaskRunBuilder.newBuilder(task).properties(option.getTaskRunProperties()).build(),
-                        option);
+                .submitTaskRun(TaskRunBuilder.newBuilder(task).properties(option.getTaskRunProperties()).type(option).
+                                build(), option);
     }
 
     public void dropTasks(List<Long> taskIdList, boolean isReplay) {
@@ -491,6 +491,50 @@ public class TaskManager {
 
         }
         return taskRunList;
+    }
+
+    /**
+     * Return the last refresh TaskRunStatus for the task which the source type is MV.
+     * The iteration order is by the task refresh time:
+     *      PendingTaskRunMap > RunningTaskRunMap > TaskRunHistory
+     * TODO: Maybe only return needed MVs rather than all MVs.
+     */
+    public Map<String, TaskRunStatus> showMVLastRefreshTaskRunStatus(String dbName) {
+        Map<String, TaskRunStatus> mvNameRunStatusMap = Maps.newHashMap();
+        if (dbName == null) {
+            for (Queue<TaskRun> pTaskRunQueue : taskRunManager.getPendingTaskRunMap().values()) {
+                pTaskRunQueue.stream()
+                        .filter(task -> task.getTask().getSource() == Constants.TaskSource.MV)
+                        .map(TaskRun::getStatus)
+                        .filter(task -> task != null)
+                        .forEach(task -> mvNameRunStatusMap.putIfAbsent(task.getTaskName(), task));
+            }
+            taskRunManager.getRunningTaskRunMap().values().stream()
+                    .filter(task -> task.getTask().getSource() == Constants.TaskSource.MV)
+                    .map(TaskRun::getStatus)
+                    .filter(task -> task != null)
+                    .forEach(task -> mvNameRunStatusMap.putIfAbsent(task.getTaskName(), task));
+            taskRunManager.getTaskRunHistory().getAllHistory().stream()
+                    .forEach(task -> mvNameRunStatusMap.putIfAbsent(task.getTaskName(), task));
+        } else {
+            for (Queue<TaskRun> pTaskRunQueue : taskRunManager.getPendingTaskRunMap().values()) {
+                pTaskRunQueue.stream()
+                        .filter(task -> task.getTask().getSource() == Constants.TaskSource.MV)
+                        .map(TaskRun::getStatus)
+                        .filter(task -> task != null)
+                        .filter(u -> u != null && u.getDbName().equals(dbName))
+                        .forEach(task -> mvNameRunStatusMap.putIfAbsent(task.getTaskName(), task));
+            }
+            taskRunManager.getRunningTaskRunMap().values().stream()
+                    .filter(task -> task.getTask().getSource() == Constants.TaskSource.MV)
+                    .map(TaskRun::getStatus)
+                    .filter(u -> u != null && u.getDbName().equals(dbName))
+                    .forEach(task -> mvNameRunStatusMap.putIfAbsent(task.getTaskName(), task));
+            taskRunManager.getTaskRunHistory().getAllHistory().stream()
+                    .filter(u -> u.getDbName().equals(dbName))
+                    .forEach(task -> mvNameRunStatusMap.putIfAbsent(task.getTaskName(), task));
+        }
+        return mvNameRunStatusMap;
     }
 
     public void replayCreateTaskRun(TaskRunStatus status) {

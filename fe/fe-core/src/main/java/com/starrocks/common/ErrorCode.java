@@ -59,6 +59,7 @@ public enum ErrorCode {
     ERR_WRONG_VALUE_COUNT(1058, new byte[] {'2', '1', 'S', '0', '1'}, "Column count doesn't match value count"),
     ERR_DUP_FIELDNAME(1060, new byte[] {'4', '2', 'S', '2', '1'}, "Duplicate column name '%s'"),
     ERR_NONUNIQ_TABLE(1066, new byte[] {'4', '2', '0', '0', '0'}, "Not unique table/alias: '%s'"),
+    ERR_NO_CATALOG_ERROR(1090, new byte[] {'4', '2', '0', '0', '0'}, "No catalog selected"),
     ERR_NO_SUCH_THREAD(1094, new byte[] {'H', 'Y', '0', '0', '0'}, "Unknown thread id: %d"),
     ERR_KILL_DENIED_ERROR(1095, new byte[] {'H', 'Y', '0', '0', '0'}, "You are not owner of thread %d"),
     ERR_NO_TABLES_USED(1096, new byte[] {'H', 'Y', '0', '0', '0'}, "No tables used"),
@@ -80,6 +81,8 @@ public enum ErrorCode {
             "%s command denied to user '%s'@'%s' for table '%s'"),
     ERR_MV_ACCESS_DENIED_ERROR(1143, new byte[] {'4', '2', '0', '0', '0'},
             "%s command denied to user '%s'@'%s' for materialized view '%s'"),
+    ERR_FUNC_ACCESS_DENIED_ERROR(1144, new byte[] {'4', '2', '0', '0', '0'},
+            "%s command denied to user '%s'@'%s' for function '%s'"),
     ERR_WRONG_COLUMN_NAME(1166, new byte[] {'4', '2', '0', '0', '0'}, "Incorrect column name '%s'"),
     ERR_UNKNOWN_SYSTEM_VARIABLE(1193, new byte[] {'H', 'Y', '0', '0', '0'}, "Unknown system variable '%s'"),
     ERR_TOO_MANY_USER_CONNECTIONS(1203, new byte[] {'4', '2', '0', '0', '0'},
@@ -133,6 +136,7 @@ public enum ErrorCode {
             "data cannot be inserted into table with empty partition. " +
                     "Use `SHOW PARTITIONS FROM %s` to see the currently partitions of this table. "),
     ERR_NO_SUCH_PARTITION(1749, new byte[] {'H', 'Y', '0', '0', '0'}, "partition '%s' doesn't exist"),
+    
     // Following is StarRocks's error code, which start from 5000
     ERR_NOT_OLAP_TABLE(5000, new byte[] {'H', 'Y', '0', '0', '0'}, "Table '%s' is not a OLAP table"),
     ERR_WRONG_PROC_PATH(5001, new byte[] {'H', 'Y', '0', '0', '0'}, "Proc path '%s' doesn't exist"),
@@ -227,13 +231,13 @@ public enum ErrorCode {
     ERR_COLOCATE_TABLE_MUST_BE_OLAP_TABLE(5063, new byte[] {'4', '2', '0', '0', '0'},
             "Colocate table '%s' must be OLAP table"),
     ERR_COLOCATE_TABLE_MUST_HAS_SAME_REPLICATION_NUM(5063, new byte[] {'4', '2', '0', '0', '0'},
-            "Colocate tables must have same replication num: %s"),
+            "Colocate tables must have same replication num: %s, with group %s"),
     ERR_COLOCATE_TABLE_MUST_HAS_SAME_BUCKET_NUM(5063, new byte[] {'4', '2', '0', '0', '0'},
-            "Colocate tables must have same bucket num: %s"),
+            "Colocate tables must have same bucket num: %s, with group %s"),
     ERR_COLOCATE_TABLE_MUST_HAS_SAME_DISTRIBUTION_COLUMN_SIZE(5063, new byte[] {'4', '2', '0', '0', '0'},
-            "Colocate tables distribution columns size must be same : %s"),
+            "Colocate tables distribution columns size must be the same : %s, with group %s"),
     ERR_COLOCATE_TABLE_MUST_HAS_SAME_DISTRIBUTION_COLUMN_TYPE(5063, new byte[] {'4', '2', '0', '0', '0'},
-            "Colocate tables distribution columns must have the same data type: %s should be %s"),
+            "Colocate tables distribution columns must have the same data type with group %s, current col: %s, should be: %s"),
     ERR_COLOCATE_NOT_COLOCATE_TABLE(5064, new byte[] {'4', '2', '0', '0', '0'},
             "Table %s is not a colocated table"),
     ERR_INVALID_OPERATION(5065, new byte[] {'4', '2', '0', '0', '0'}, "Operation %s is invalid"),
@@ -249,8 +253,6 @@ public enum ErrorCode {
             "Invalid dynamic partition end %s"),
     ERROR_DYNAMIC_PARTITION_END_EMPTY(5066, new byte[] {'4', '2', '0', '0', '0'},
             "Dynamic partition end is empty"),
-    ERROR_DYNAMIC_PARTITION_BUCKETS_ZERO(5067, new byte[] {'4', '2', '0', '0', '0'},
-            "Dynamic partition buckets must greater than 0"),
     ERROR_DYNAMIC_PARTITION_BUCKETS_FORMAT(5067, new byte[] {'4', '2', '0', '0', '0'},
             "Invalid dynamic partition buckets %s"),
     ERROR_DYNAMIC_PARTITION_BUCKETS_EMPTY(5066, new byte[] {'4', '2', '0', '0', '0'},
@@ -303,10 +305,14 @@ public enum ErrorCode {
             "Export job [%s] not found when checking privilege"),
     ERR_PRIVILEGE_BACKUP_JOB_NOT_FOUND(5091, new byte[] {'4', '2', '0', '0', '0'},
             "Backup job not found when checking privilege"),
+    ERROR_DYNAMIC_PARTITION_HISTORY_PARTITION_NUM_ZERO(5092, new byte[] {'4', '2', '0', '0', '0'},
+            "Dynamic history partition num must greater than 0"),
     ERR_PLAN_VALIDATE_ERROR(6000, new byte[] {'0', '7', '0', '0', '0'},
             "Incorrect logical plan found in operator: %s. Invalid reason: %s"),
-    ERR_INVALID_DATE_ERROR(6001, new byte[] {'2', '2', '0', '0', '0'}, "Incorrect %s value %s");
+    ERR_INVALID_DATE_ERROR(6001, new byte[] {'2', '2', '0', '0', '0'}, "Incorrect %s value %s"),
 
+    ERR_BAD_WAREHOUSE_ERROR(6002, new byte[] {'4', '2', '0', '0', '0'},
+            "Unknown warehouse '%s'");
 
 
     ErrorCode(int code, byte[] sqlState, String errorMsg) {

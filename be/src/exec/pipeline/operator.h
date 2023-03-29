@@ -130,11 +130,15 @@ public:
     // 3. operators decorated by MultilaneOperator except case 2: e.g. ProjectOperator, Chunk AccumulateOperator and etc.
     virtual Status reset_state(RuntimeState* state, const std::vector<ChunkPtr>& refill_chunks) { return Status::OK(); }
 
+    virtual size_t output_amplification_factor() const { return 1; }
+    enum class OutputAmplificationType { ADD, MAX };
+    virtual OutputAmplificationType intra_pipeline_amplification_type() const { return OutputAmplificationType::MAX; }
+
     int32_t get_id() const { return _id; }
 
     int32_t get_plan_node_id() const { return _plan_node_id; }
 
-    RuntimeProfile* get_runtime_profile() const { return _runtime_profile.get(); }
+    MemTracker* mem_tracker() const { return _mem_tracker.get(); }
 
     virtual std::string get_name() const {
         return strings::Substitute("$0_$1_$2($3)", _name, _plan_node_id, this, is_finished() ? "X" : "O");
@@ -217,6 +221,13 @@ public:
     // Called when the new Epoch starts at first to reset operator's internal state.
     virtual Status reset_epoch(RuntimeState* state) { return Status::OK(); }
 
+    // it means this operator need spill
+    virtual void mark_need_spill() { _marked_need_spill = true; }
+    bool need_mark_spill() { return _marked_need_spill; }
+    // the memory that can be freed by the current operator
+    size_t revocable_mem_bytes() { return _revocable_mem_bytes; }
+    void set_revocable_mem_bytes(size_t bytes) { _revocable_mem_bytes = bytes; }
+
 protected:
     OperatorFactory* _factory;
     const int32_t _id;
@@ -233,15 +244,15 @@ protected:
     std::shared_ptr<RuntimeProfile> _common_metrics;
     std::shared_ptr<RuntimeProfile> _unique_metrics;
 
-    // All the memory usage will be automatically added to the instance level MemTracker by memory allocate hook
-    // But for some special operators, we hope to see the memory usage of some special data structures,
-    // such as hash table of aggregate operators.
-    // So the following indenpendent MemTracker is introduced to record these memory usage
-    std::shared_ptr<MemTracker> _mem_tracker = nullptr;
     bool _conjuncts_and_in_filters_is_cached = false;
     std::vector<ExprContext*> _cached_conjuncts_and_in_filters;
 
     RuntimeBloomFilterEvalContext _bloom_filter_eval_context;
+
+    // if _need_spill is true. reserved data in this operator need spill
+    bool _marked_need_spill = false;
+    // the memory that can be released by this operator
+    size_t _revocable_mem_bytes = 0;
 
     // Common metrics
     RuntimeProfile::Counter* _total_timer = nullptr;
@@ -269,6 +280,10 @@ protected:
 private:
     void _init_rf_counters(bool init_bloom);
     void _init_conjuct_counters();
+
+    // All the memory usage will be automatically added to this MemTracker by memory allocate hook
+    // Do not use this MemTracker manually
+    std::shared_ptr<MemTracker> _mem_tracker = nullptr;
 };
 
 class OperatorFactory {

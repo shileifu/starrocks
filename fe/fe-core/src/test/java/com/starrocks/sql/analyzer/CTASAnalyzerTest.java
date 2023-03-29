@@ -19,6 +19,7 @@ import com.starrocks.analysis.KeysDesc;
 import com.starrocks.catalog.KeysType;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Table;
+import com.starrocks.common.AnalysisException;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.FeConstants;
@@ -236,7 +237,7 @@ public class CTASAnalyzerTest {
         ConnectContext ctx = starRocksAssert.getCtx();
         String partitionSQL = "create table test2 " +
                 "PARTITION BY RANGE(`k1`)(" +
-                "START (\"2021-03-01\") END (\"2022-03-31\") EVERY (INTERVAL 1 MONTH)\n" +
+                "START (\"2021-03-01\") END (\"2022-04-01\") EVERY (INTERVAL 1 MONTH)\n" +
                 ") AS select k1 from duplicate_table_with_null;";
 
         UtFrameUtils.parseStmtWithNewParser(partitionSQL, ctx);
@@ -389,6 +390,15 @@ public class CTASAnalyzerTest {
         Map<String, String> properties2 = createTableStmt2.getCreateTableStmt().getProperties();
         Assert.assertTrue(properties2.containsKey("replication_num"));
         Assert.assertEquals(properties2.get("replication_num"), "1");
+    }
+
+    @Test(expected = AnalysisException.class)
+    public void testUnsupported() throws Exception {
+        ConnectContext ctx = starRocksAssert.getCtx();
+        String sql = "create table table_01 PARTITION BY date_trunc('day', k1) as " +
+                "select k1, k2, k3 from  duplicate_table_with_null;";
+        CreateTableAsSelectStmt createTableStmt =
+                (CreateTableAsSelectStmt) UtFrameUtils.parseStmtWithNewParser(sql, ctx);
     }
 
     @Test

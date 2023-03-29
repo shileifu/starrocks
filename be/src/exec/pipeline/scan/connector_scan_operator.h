@@ -45,6 +45,7 @@ public:
     ActiveInputSet& get_active_inputs() { return _active_inputs; }
 
     TPartitionType::type partition_type() const override { return TPartitionType::BUCKET_SHUFFLE_HASH_PARTITIONED; }
+    const std::vector<ExprContext*>& partition_exprs() const override;
 
 private:
     // TODO: refactor the OlapScanContext, move them into the context
@@ -88,13 +89,18 @@ public:
     Status prepare(RuntimeState* state) override;
     void close(RuntimeState* state) override;
 
+protected:
+    virtual bool _reach_eof() { return _limit != -1 && _rows_read >= _limit; }
+    Status _open_data_source(RuntimeState* state);
+
+    connector::DataSourcePtr _data_source;
+    [[maybe_unused]] ConnectorScanNode* _scan_node;
+
 private:
     Status _read_chunk(RuntimeState* state, ChunkPtr* chunk) override;
 
     const workgroup::WorkGroupScanSchedEntity* _scan_sched_entity(const workgroup::WorkGroup* wg) const override;
 
-    connector::DataSourcePtr _data_source;
-    [[maybe_unused]] ConnectorScanNode* _scan_node;
     const int64_t _limit; // -1: no limit
     const std::vector<ExprContext*>& _runtime_in_filters;
     const RuntimeFilterProbeCollector* _runtime_bloom_filters;
@@ -105,7 +111,6 @@ private:
     // =========================
     RuntimeState* _runtime_state = nullptr;
     ChunkPipelineAccumulator _ck_acc;
-    Status _status = Status::OK();
     bool _opened = false;
     bool _closed = false;
     uint64_t _rows_read = 0;

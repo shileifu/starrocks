@@ -67,12 +67,12 @@ import com.starrocks.common.util.TimeUtils;
 import com.starrocks.metric.GaugeMetric;
 import com.starrocks.metric.Metric.MetricUnit;
 import com.starrocks.metric.MetricRepo;
-import com.starrocks.persist.BackendTabletsInfo;
+import com.starrocks.persist.DataNodeTabletsInfo;
 import com.starrocks.persist.ReplicaPersistInfo;
 import com.starrocks.qe.QueryQueueManager;
 import com.starrocks.server.GlobalStateMgr;
-import com.starrocks.system.Backend;
-import com.starrocks.system.Backend.BackendStatus;
+import com.starrocks.system.ComputeNode;
+import com.starrocks.system.DataNode;
 import com.starrocks.system.SystemInfoService;
 import com.starrocks.task.AgentBatchTask;
 import com.starrocks.task.AgentTask;
@@ -114,6 +114,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
+import java.util.stream.Collectors;
 
 public class ReportHandler extends Daemon {
     public enum ReportType {
@@ -162,16 +163,28 @@ public class ReportHandler extends Daemon {
         TBackend tBackend = request.getBackend();
         String host = tBackend.getHost();
         int bePort = tBackend.getBe_port();
-        Backend backend = GlobalStateMgr.getCurrentSystemInfo().getBackendWithBePort(host, bePort);
-        if (backend == null) {
-            tStatus.setStatus_code(TStatusCode.INTERNAL_ERROR);
-            List<String> errorMsgs = Lists.newArrayList();
-            errorMsgs.add("backend[" + host + ":" + bePort + "] does not exist.");
-            tStatus.setError_msgs(errorMsgs);
-            return result;
+        long beId;
+        DataNode backend = GlobalStateMgr.getCurrentSystemInfo().getBackendWithBePort(host, bePort);
+        if (backend != null) {
+            beId = backend.getId();
+        } else {
+            ComputeNode computeNode = null;
+            // Compute node only reports resource usage.
+            if (request.isSetResource_usage()) {
+                computeNode = GlobalStateMgr.getCurrentSystemInfo().getComputeNodeWithBePort(host, bePort);
+            }
+
+            if (computeNode != null) {
+                beId = computeNode.getId();
+            } else {
+                tStatus.setStatus_code(TStatusCode.INTERNAL_ERROR);
+                List<String> errorMsgs = Lists.newArrayList();
+                errorMsgs.add("backend or compute node [" + host + ":" + bePort + "] does not exist.");
+                tStatus.setError_msgs(errorMsgs);
+                return result;
+            }
         }
 
-        long beId = backend.getId();
         Map<TTaskType, Set<Long>> tasks = null;
         Map<String, TDisk> disks = null;
         Map<Long, TTablet> tablets = null;
@@ -210,13 +223,13 @@ public class ReportHandler extends Daemon {
                         "invalid report request, multi fields " + reportType + " " + ReportType.TABLET_REPORT);
                 return result;
             }
-            // the 'tablets' member will be deprecated in future.
+            // the 'tablets' member will be deprecated in the future.
             tablets = buildTabletMap(request.getTablet_list());
             reportVersion = request.getReport_version();
             reportType = ReportType.TABLET_REPORT;
         }
 
-        if (request.isSetTablet_max_compaction_score()) {
+        if (backend != null && request.isSetTablet_max_compaction_score()) {
             backend.setTabletMaxCompactionScore(request.getTablet_max_compaction_score());
         }
 
@@ -260,8 +273,8 @@ public class ReportHandler extends Daemon {
             return result;
         }
 
-        LOG.debug("report received from be {}. type: {}, current queue size: {}",
-                backend.getId(), reportType, reportQueue.size());
+        LOG.debug("report received from be/computeNode {}. type: {}, current queue size: {}",
+                beId, reportType, reportQueue.size());
         return result;
     }
 
@@ -366,8 +379,9 @@ public class ReportHandler extends Daemon {
         // storage medium -> tablet id
         ListMultimap<TStorageMedium, Long> tabletMigrationMap = ArrayListMultimap.create();
 
-        // dbid -> txn id -> [partition info]
-        Map<Long, ListMultimap<Long, TPartitionVersionInfo>> transactionsToPublish = Maps.newHashMap();
+        // dbid -> txn id -> partition id -> [partition info]
+        Map<Long, Map<Long, Map<Long, TPartitionVersionInfo>>> transactionsToPublish = Maps.newHashMap();
+
         Map<Long, Long> transactionsToCommitTime = Maps.newHashMap();
         ListMultimap<Long, Long> transactionsToClear = ArrayListMultimap.create();
 
@@ -424,9 +438,9 @@ public class ReportHandler extends Daemon {
         handleSetTabletBinlogConfig(backendId, backendTablets);
 
         final SystemInfoService currentSystemInfo = GlobalStateMgr.getCurrentSystemInfo();
-        Backend reportBackend = currentSystemInfo.getBackend(backendId);
+        DataNode reportBackend = currentSystemInfo.getBackend(backendId);
         if (reportBackend != null) {
-            BackendStatus backendStatus = reportBackend.getBackendStatus();
+            DataNode.BackendStatus backendStatus = reportBackend.getBackendStatus();
             backendStatus.lastSuccessReportTabletsTime = TimeUtils.longToTimeString(start);
         }
 
@@ -484,7 +498,7 @@ public class ReportHandler extends Daemon {
     private static void diskReport(long backendId, Map<String, TDisk> backendDisks) {
         LOG.debug("begin to handle disk report from backend {}", backendId);
         long start = System.currentTimeMillis();
-        Backend backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(backendId);
+        DataNode backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(backendId);
         if (backend == null) {
             LOG.warn("backend doesn't exist. id: " + backendId);
             return;
@@ -501,7 +515,7 @@ public class ReportHandler extends Daemon {
     private static void workgroupReport(long backendId, List<TWorkGroup> workGroups) {
         LOG.debug("begin to handle workgroup report from backend{}", backendId);
         long start = System.currentTimeMillis();
-        Backend backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(backendId);
+        DataNode backend = GlobalStateMgr.getCurrentSystemInfo().getBackend(backendId);
         if (backend == null) {
             LOG.warn("backend does't exist. id: " + backendId);
         }
@@ -792,7 +806,7 @@ public class ReportHandler extends Daemon {
                                         LOG.warn("tablet {} has only one replica {} on backend {}"
                                                         + " and it is lost, set it as bad",
                                                 tabletId, replica.getId(), backendId);
-                                        BackendTabletsInfo tabletsInfo = new BackendTabletsInfo(backendId);
+                                        DataNodeTabletsInfo tabletsInfo = new DataNodeTabletsInfo(backendId);
                                         tabletsInfo.setBad(true);
                                         ReplicaPersistInfo replicaPersistInfo = ReplicaPersistInfo.createForReport(
                                                 dbId, tableId, partitionId, indexId, tabletId, backendId,
@@ -996,17 +1010,18 @@ public class ReportHandler extends Daemon {
     }
 
     private static void handleRepublishVersionInfo(
-            Map<Long, ListMultimap<Long, TPartitionVersionInfo>> transactionsToPublish,
+            Map<Long, Map<Long, Map<Long, TPartitionVersionInfo>>> transactionsToPublish,
             Map<Long, Long> transactionsToCommitTime,
             long backendId) {
         AgentBatchTask batchTask = new AgentBatchTask();
         long createPublishVersionTaskTime = System.currentTimeMillis();
         for (Long dbId : transactionsToPublish.keySet()) {
-            ListMultimap<Long, TPartitionVersionInfo> map = transactionsToPublish.get(dbId);
+            Map<Long, Map<Long, TPartitionVersionInfo>> map = transactionsToPublish.get(dbId);
             for (long txnId : map.keySet()) {
                 long commitTime = transactionsToCommitTime.get(txnId);
                 PublishVersionTask task =
-                        new PublishVersionTask(backendId, txnId, dbId, commitTime, map.get(txnId), null, null,
+                        new PublishVersionTask(backendId, txnId, dbId, commitTime,
+                                map.get(txnId).values().stream().collect(Collectors.toList()), null, null,
                                 createPublishVersionTaskTime, null);
                 batchTask.addTask(task);
                 // add to AgentTaskQueue for handling finish report.
@@ -1022,12 +1037,12 @@ public class ReportHandler extends Daemon {
             return;
         }
 
-        // print a warn log here to indicate the exceptions on the backend
+        // print a warning log here to indicate the exceptions on the backend
         LOG.warn("find {} tablets on backend {} which is bad or misses versions that need clone or force recovery",
                 tabletRecoveryMap.size(), backendId);
 
         TabletInvertedIndex invertedIndex = GlobalStateMgr.getCurrentInvertedIndex();
-        BackendTabletsInfo backendTabletsInfo = new BackendTabletsInfo(backendId);
+        DataNodeTabletsInfo backendTabletsInfo = new DataNodeTabletsInfo(backendId);
         backendTabletsInfo.setBad(true);
         for (Long dbId : tabletRecoveryMap.keySet()) {
             Database db = GlobalStateMgr.getCurrentState().getDb(dbId);

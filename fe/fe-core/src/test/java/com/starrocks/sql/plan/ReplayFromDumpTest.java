@@ -15,6 +15,7 @@
 package com.starrocks.sql.plan;
 
 import com.google.common.collect.Lists;
+import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.Pair;
 import com.starrocks.persist.gson.GsonUtils;
@@ -25,7 +26,7 @@ import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.dump.QueryDumpInfo;
 import com.starrocks.sql.optimizer.rule.RuleSet;
 import com.starrocks.sql.optimizer.rule.transformation.JoinAssociativityRule;
-import com.starrocks.system.BackendCoreStat;
+import com.starrocks.system.DataNodeCoreStat;
 import com.starrocks.thrift.TExplainLevel;
 import com.starrocks.utframe.StarRocksAssert;
 import com.starrocks.utframe.UtFrameUtils;
@@ -56,6 +57,8 @@ public class ReplayFromDumpTest {
     @BeforeClass
     public static void beforeClass() throws Exception {
         UtFrameUtils.createMinStarRocksCluster();
+        // Should disable Dynamic Partition in replay dump test
+        Config.dynamic_partition_enable = false;
         // create connect context
         connectContext = UtFrameUtils.createDefaultCtx();
         connectContext.getSessionVariable().setOptimizerExecuteTimeout(30000);
@@ -68,7 +71,7 @@ public class ReplayFromDumpTest {
 
     @Before
     public void before() {
-        BackendCoreStat.reset();
+        DataNodeCoreStat.reset();
         connectContext.getSessionVariable().setCboPushDownAggregateMode(-1);
     }
 
@@ -647,43 +650,6 @@ public class ReplayFromDumpTest {
     }
 
     @Test
-    public void testHiveTPCH02UsingResource() throws Exception {
-        Pair<QueryDumpInfo, String> replayPair =
-                getPlanFragment(getDumpInfoFromFile("query_dump/hive_tpch02_resource"), null, TExplainLevel.COSTS);
-        Assert.assertTrue(replayPair.second, replayPair.second.contains("6:HASH JOIN\n" +
-                "  |  join op: INNER JOIN (BROADCAST)\n" +
-                "  |  equal join conjunct: [24: n_regionkey, INT, true] = [26: r_regionkey, INT, true]\n" +
-                "  |  build runtime filters:\n" +
-                "  |  - filter_id = 0, build_expr = (26: r_regionkey), remote = false\n" +
-                "  |  output columns: 22, 23\n" +
-                "  |  cardinality: 23"));
-    }
-
-    @Test
-    public void testHiveTPCH05UsingResource() throws Exception {
-        Pair<QueryDumpInfo, String> replayPair =
-                getPlanFragment(getDumpInfoFromFile("query_dump/hive_tpch05_resource"), null, TExplainLevel.COSTS);
-        Assert.assertTrue(replayPair.second, replayPair.second.contains("20:HASH JOIN\n" +
-                "  |  join op: INNER JOIN (PARTITIONED)\n" +
-                "  |  equal join conjunct: [10: o_custkey, INT, true] = [1: c_custkey, INT, true]\n" +
-                "  |  output columns: 4, 9\n" +
-                "  |  cardinality: 22765073"));
-    }
-
-    @Test
-    public void testHiveTPCH08UsingResource() throws Exception {
-        Pair<QueryDumpInfo, String> replayPair =
-                getPlanFragment(getDumpInfoFromFile("query_dump/hive_tpch08_resource"), null, TExplainLevel.COSTS);
-        Assert.assertTrue(replayPair.second, replayPair.second.contains("  21:HASH JOIN\n" +
-                "  |  join op: INNER JOIN (BROADCAST)\n" +
-                "  |  equal join conjunct: [52: n_regionkey, INT, true] = [58: r_regionkey, INT, true]\n" +
-                "  |  build runtime filters:\n" +
-                "  |  - filter_id = 3, build_expr = (58: r_regionkey), remote = false\n" +
-                "  |  output columns: 50\n" +
-                "  |  cardinality: 5"));
-    }
-
-    @Test
     public void testGatherWindowCTE2() throws Exception {
         Pair<QueryDumpInfo, String> replayPair =
                 getPlanFragment(getDumpInfoFromFile("query_dump/gather_window_cte"), null, TExplainLevel.COSTS);
@@ -699,14 +665,14 @@ public class ReplayFromDumpTest {
     public void testMultiSubqueries() throws Exception {
         Pair<QueryDumpInfo, String> replayPair =
                 getPlanFragment(getDumpInfoFromFile("query_dump/subquery_statistics"), null, TExplainLevel.COSTS);
-        Assert.assertTrue(replayPair.second, replayPair.second.contains("96:AGGREGATE (update serialize)\n" +
+        Assert.assertTrue(replayPair.second, replayPair.second.contains("  95:AGGREGATE (update serialize)\n" +
                 "  |  aggregate: count[(*); args: ; result: BIGINT; args nullable: false; result nullable: false]\n" +
                 "  |  hasNullableGenerateChild: true\n" +
                 "  |  cardinality: 1\n" +
                 "  |  column statistics: \n" +
                 "  |  * count-->[0.0, 1.0420273298435367, 0.0, 8.0, 1.0] ESTIMATE\n" +
                 "  |  \n" +
-                "  95:Project\n" +
+                "  94:Project\n" +
                 "  |  output columns:\n" +
                 "  |  548 <-> 1\n" +
                 "  |  hasNullableGenerateChild: true\n" +
@@ -738,4 +704,48 @@ public class ReplayFromDumpTest {
                 "     tabletRatio=88635/88635"));
     }
 
+    @Test
+    public void testGroupByDistinctColumnSkewHint() throws Exception {
+        Pair<QueryDumpInfo, String> replayPair =
+                getPlanFragment(getDumpInfoFromFile("query_dump/group_by_count_distinct_skew_hint"), null,
+                        TExplainLevel.NORMAL);
+        Assert.assertTrue(replayPair.second, replayPair.second.contains("  9:Project\n" +
+                "  |  <slot 39> : 39: year\n" +
+                "  |  <slot 42> : 42: case\n" +
+                "  |  <slot 45> : CAST(murmur_hash3_32(CAST(42: case AS VARCHAR)) % 512 AS SMALLINT)" +
+                ""));
+    }
+
+    @Test
+    public void testGroupByDistinctColumnOptimization() throws Exception {
+        Pair<QueryDumpInfo, String> replayPair =
+                getPlanFragment(getDumpInfoFromFile("query_dump/group_by_count_distinct_optimize"), null,
+                        TExplainLevel.NORMAL);
+        Assert.assertTrue(replayPair.second, replayPair.second.contains("  9:Project\n" +
+                "  |  <slot 39> : 39: year\n" +
+                "  |  <slot 42> : 42: case\n" +
+                "  |  <slot 45> : CAST(murmur_hash3_32(CAST(42: case AS VARCHAR)) % 512 AS SMALLINT)" +
+                ""));
+    }
+
+    @Test
+    public void testPushDownDistinctAggBelowWindowRewrite() throws Exception {
+        Pair<QueryDumpInfo, String> replayPair =
+                getPlanFragment(getDumpInfoFromFile("query_dump/pushdown_distinct_agg_below_window"), null,
+                        TExplainLevel.COSTS);
+        Assert.assertTrue(replayPair.second.contains("  1:AGGREGATE (update finalize)\n" +
+                "  |  aggregate: sum[([3: gross, DECIMAL128(10,2), false]); args: DECIMAL128; " +
+                "result: DECIMAL128(38,2); args nullable: false; result nullable: true]\n" +
+                "  |  group by: [2: trans_date, DATE, false], [1: country, VARCHAR, true]\n" +
+                "  |  cardinality: 49070\n"));
+    }
+
+    @Test
+    public void testSSBRightOuterJoinCase() throws Exception {
+        Pair<QueryDumpInfo, String> replayPair =
+                getPlanFragment(getDumpInfoFromFile("query_dump/right_outer_join_case"), null,
+                        TExplainLevel.COSTS);
+        Assert.assertTrue(replayPair.second.contains("4:NESTLOOP JOIN\n" +
+                "  |  join op: RIGHT OUTER JOIN"));
+    }
 }

@@ -48,16 +48,10 @@ add_library(Formats STATIC
         parquet/stored_column_reader.cpp
         parquet/utils.cpp
         parquet/metadata.cpp
+        parquet/meta_helper.cpp
         parquet/group_reader.cpp
         parquet/file_reader.cpp
+        parquet/file_writer.cpp
         )
-
-# simdjson Runtime Implement Dispatch: https://github.com/simdjson/simdjson/blob/master/doc/implementation-selection.md#runtime-cpu-detection
-# Unset architecture-specific flags to avoid breaking implement runtime dispatch.
-if ("${CMAKE_BUILD_TARGET_ARCH}" STREQUAL "x86" OR "${CMAKE_BUILD_TARGET_ARCH}" STREQUAL "x86_64")
-    set_source_files_properties(json/nullable_column.cpp PROPERTIES COMPILE_FLAGS -mno-avx)
-    set_source_files_properties(json/binary_column.cpp PROPERTIES COMPILE_FLAGS -mno-avx)
-    set_source_files_properties(json/numeric_column.cpp PROPERTIES COMPILE_FLAGS -mno-avx)
-endif()
 
 add_subdirectory(orc/apache-orc)

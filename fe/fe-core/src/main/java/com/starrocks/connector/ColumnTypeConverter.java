@@ -30,6 +30,7 @@ import io.delta.standalone.types.DataType;
 import org.apache.avro.LogicalType;
 import org.apache.avro.LogicalTypes;
 import org.apache.avro.Schema;
+import org.apache.iceberg.types.Types;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -41,8 +42,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class ColumnTypeConverter {
-    public static final String DECIMAL_PATTERN = "^decimal\\((\\d+),(\\d+)\\)";
-    public static final String COMPLEX_PATTERN = "([0-9a-z<>(),:_]+)";
+    public static final String DECIMAL_PATTERN = "^decimal\\((\\d+), *(\\d+)\\)";
+    public static final String COMPLEX_PATTERN = "([0-9a-z<>(),:_ ]+)";
     public static final String ARRAY_PATTERN = "^array<" + COMPLEX_PATTERN + ">";
     public static final String MAP_PATTERN = "^map<" + COMPLEX_PATTERN + ">";
     public static final String STRUCT_PATTERN = "^struct<" + COMPLEX_PATTERN + ">";
@@ -166,7 +167,7 @@ public class ColumnTypeConverter {
             case STRING:
                 return ScalarType.createDefaultExternalTableString();
             case ARRAY:
-                Type type = fromHudiTypeToArrayType(avroSchema);
+                Type type = new ArrayType(fromHudiType(avroSchema.getElementType()));
                 if (type.isArrayType()) {
                     return type;
                 } else {
@@ -176,14 +177,8 @@ public class ColumnTypeConverter {
             case FIXED:
             case BYTES:
                 if (logicalType instanceof LogicalTypes.Decimal) {
-                    int precision = 0;
-                    int scale = 0;
-                    if (avroSchema.getObjectProp("precision") instanceof Integer) {
-                        precision = (int) avroSchema.getObjectProp("precision");
-                    }
-                    if (avroSchema.getObjectProp("scale") instanceof Integer) {
-                        scale = (int) avroSchema.getObjectProp("scale");
-                    }
+                    int precision = ((LogicalTypes.Decimal) logicalType).getPrecision();
+                    int scale = ((LogicalTypes.Decimal) logicalType).getScale();
                     return ScalarType.createUnifiedDecimalType(precision, scale);
                 } else {
                     primitiveType = PrimitiveType.VARCHAR;
@@ -243,6 +238,78 @@ public class ColumnTypeConverter {
         return ScalarType.createType(primitiveType);
     }
 
+    // used for HUDI MOR reader only
+    // convert hudi column type(avroSchema) to hive type string with some customization
+    public static String fromHudiTypeToHiveTypeString(Schema avroSchema) {
+        Schema.Type columnType = avroSchema.getType();
+        LogicalType logicalType = avroSchema.getLogicalType();
+
+        switch (columnType) {
+            case BOOLEAN:
+                return "boolean";
+            case INT:
+                if (logicalType instanceof LogicalTypes.Date) {
+                    return "date";
+                } else if (logicalType instanceof LogicalTypes.TimeMillis) {
+                    throw new StarRocksConnectorException("Unsupported hudi {} type of column {}",
+                            logicalType.getName(), avroSchema.getName());
+                } else {
+                    return "int";
+                }
+            case LONG:
+                if (logicalType instanceof LogicalTypes.TimeMicros) {
+                    throw new StarRocksConnectorException("Unsupported hudi {} type of column {}",
+                            logicalType.getName(), avroSchema.getName());
+                } else if (logicalType instanceof LogicalTypes.TimestampMillis
+                        || logicalType instanceof LogicalTypes.TimestampMicros) {
+                    // customized value for int64 based timestamp
+                    return logicalType.getName();
+                } else {
+                    return "bigint";
+                }
+            case FLOAT:
+                return "float";
+            case DOUBLE:
+                return "double";
+            case STRING:
+                return "string";
+            case ARRAY:
+                String elementType = fromHudiTypeToHiveTypeString(avroSchema.getElementType());
+                return String.format("array<%s>", elementType);
+            case FIXED:
+            case BYTES:
+                if (logicalType instanceof LogicalTypes.Decimal) {
+                    int precision = ((LogicalTypes.Decimal) logicalType).getPrecision();
+                    int scale = ((LogicalTypes.Decimal) logicalType).getScale();
+                    return String.format("decimal(%s,%s)", precision, scale);
+                } else {
+                    return "string";
+                }
+            case RECORD:
+                // Struct type
+                List<Schema.Field> fields = avroSchema.getFields();
+                Preconditions.checkArgument(fields.size() > 0);
+                String nameToType = fields.stream()
+                        .map(f -> String.format("%s:%s", f.name(),
+                                fromHudiTypeToHiveTypeString(f.schema())))
+                        .collect(Collectors.joining(","));
+                return String.format("struct<%s>", nameToType);
+            case MAP:
+                Schema value = avroSchema.getValueType();
+                String valueType = fromHudiTypeToHiveTypeString(value);
+                return String.format("map<%s,%s>", "string", valueType);
+            case UNION:
+                List<Schema> nonNullMembers = avroSchema.getTypes().stream()
+                        .filter(schema -> !Schema.Type.NULL.equals(schema.getType()))
+                        .collect(Collectors.toList());
+                return fromHudiTypeToHiveTypeString(nonNullMembers.get(0));
+            case ENUM:
+            default:
+                throw new StarRocksConnectorException("Unsupported hudi {} type of column {}",
+                        avroSchema.getType().getName(), avroSchema.getName());
+        }
+    }
+
     public static Type fromDeltaLakeType(DataType dataType) {
         if (dataType == null) {
             return Type.NULL;
@@ -285,7 +352,7 @@ public class ColumnTypeConverter {
                 int scale = ((io.delta.standalone.types.DecimalType) dataType).getScale();
                 return ScalarType.createUnifiedDecimalType(precision, scale);
             case ARRAY:
-                Type type = convertToArrayType((io.delta.standalone.types.ArrayType) dataType);
+                Type type = convertToArrayTypeForDeltaLake((io.delta.standalone.types.ArrayType) dataType);
                 if (type.isArrayType()) {
                     return type;
                 } else {
@@ -303,8 +370,98 @@ public class ColumnTypeConverter {
         return ScalarType.createType(primitiveType);
     }
 
-    private static ArrayType convertToArrayType(io.delta.standalone.types.ArrayType arrayType) {
-        return new ArrayType(fromDeltaLakeType(arrayType.getElementType()), true);
+    public static Type fromIcebergType(org.apache.iceberg.types.Type icebergType) {
+        if (icebergType == null) {
+            return Type.NULL;
+        }
+
+        PrimitiveType primitiveType;
+
+        switch (icebergType.typeId()) {
+            case BOOLEAN:
+                primitiveType = PrimitiveType.BOOLEAN;
+                break;
+            case INTEGER:
+                primitiveType = PrimitiveType.INT;
+                break;
+            case LONG:
+                primitiveType = PrimitiveType.BIGINT;
+                break;
+            case FLOAT:
+                primitiveType = PrimitiveType.FLOAT;
+                break;
+            case DOUBLE:
+                primitiveType = PrimitiveType.DOUBLE;
+                break;
+            case DATE:
+                primitiveType = PrimitiveType.DATE;
+                break;
+            case TIMESTAMP:
+                primitiveType = PrimitiveType.DATETIME;
+                break;
+            case STRING:
+            case UUID:
+                return ScalarType.createDefaultExternalTableString();
+            case DECIMAL:
+                int precision = ((Types.DecimalType) icebergType).precision();
+                int scale = ((Types.DecimalType) icebergType).scale();
+                return ScalarType.createUnifiedDecimalType(precision, scale);
+            case LIST:
+                Type type = convertToArrayTypeForIceberg(icebergType);
+                if (type.isArrayType()) {
+                    return type;
+                } else {
+                    return Type.UNKNOWN_TYPE;
+                }
+            case MAP:
+                Type mapType = convertToMapTypeForIceberg(icebergType);
+                if (mapType.isMapType()) {
+                    return mapType;
+                } else {
+                    return Type.UNKNOWN_TYPE;
+                }
+            case STRUCT:
+                List<Types.NestedField> fields = icebergType.asStructType().fields();
+                Preconditions.checkArgument(fields.size() > 0);
+                ArrayList<StructField> structFields = new ArrayList<>(fields.size());
+                for (Types.NestedField field : fields) {
+                    String fieldName = field.name();
+                    Type fieldType = fromIcebergType(field.type());
+                    if (fieldType.isUnknown()) {
+                        return Type.UNKNOWN_TYPE;
+                    }
+                    structFields.add(new StructField(fieldName, fieldType));
+                }
+                return new StructType(structFields);
+            case BINARY:
+                return Type.VARBINARY;
+            case TIME:
+            case FIXED:
+            default:
+                primitiveType = PrimitiveType.UNKNOWN_TYPE;
+        }
+        return ScalarType.createType(primitiveType);
+    }
+
+    private static ArrayType convertToArrayTypeForIceberg(org.apache.iceberg.types.Type icebergType) {
+        return new ArrayType(fromIcebergType(icebergType.asNestedType().asListType().elementType()));
+    }
+
+    private static Type convertToMapTypeForIceberg(org.apache.iceberg.types.Type icebergType) {
+        Type keyType = fromIcebergType(icebergType.asMapType().keyType());
+        // iceberg support complex type as key type, but sr is not supported now
+        if (keyType.isComplexType() || keyType.isUnknown()) {
+            return Type.UNKNOWN_TYPE;
+        }
+        Type valueType = fromIcebergType(icebergType.asMapType().valueType());
+        if (valueType.isUnknown()) {
+            return Type.UNKNOWN_TYPE;
+        }
+        return new MapType(keyType, valueType);
+    }
+
+    private static ArrayType convertToArrayTypeForDeltaLake(io.delta.standalone.types.ArrayType arrayType) {
+        return new ArrayType(fromDeltaLakeType(arrayType.getElementType()));
     }
 
     public static String getTypeKeyword(String type) {
@@ -329,8 +486,7 @@ public class ColumnTypeConverter {
 
     // Array string like "Array<Array<int>>"
     public static Type fromHiveTypeToArrayType(String typeStr) {
-        if (!HIVE_UNSUPPORTED_TYPES.stream().filter(typeStr.toUpperCase()::contains).collect(Collectors.toList())
-                .isEmpty()) {
+        if (HIVE_UNSUPPORTED_TYPES.stream().anyMatch(typeStr.toUpperCase()::contains)) {
             return Type.UNKNOWN_TYPE;
         }
         Matcher matcher = Pattern.compile(ARRAY_PATTERN).matcher(typeStr.toLowerCase(Locale.ROOT));
@@ -339,7 +495,7 @@ public class ColumnTypeConverter {
             if (fromHiveTypeToArrayType(matcher.group(1)).equals(Type.UNKNOWN_TYPE)) {
                 itemType = Type.UNKNOWN_TYPE;
             } else {
-                itemType = new ArrayType(fromHiveTypeToArrayType(matcher.group(1)), true);
+                itemType = new ArrayType(fromHiveTypeToArrayType(matcher.group(1)));
             }
         } else {
             itemType = fromHiveType(typeStr);
@@ -429,11 +585,7 @@ public class ColumnTypeConverter {
         throw new StarRocksConnectorException("Failed to get varchar length at " + typeStr);
     }
 
-    private static ArrayType fromHudiTypeToArrayType(Schema typeSchema) {
-        return new ArrayType(fromHudiType(typeSchema.getElementType()), true);
-    }
-
-    public static boolean validateHiveColumnType(Type type, Type otherType) {
+    public static boolean validateColumnType(Type type, Type otherType) {
         if (type == null || otherType == null) {
             return false;
         }
@@ -444,7 +596,7 @@ public class ColumnTypeConverter {
 
         if (type.isArrayType()) {
             if (otherType.isArrayType()) {
-                return validateHiveColumnType(((ArrayType) type).getItemType(), ((ArrayType) otherType).getItemType());
+                return validateColumnType(((ArrayType) type).getItemType(), ((ArrayType) otherType).getItemType());
             } else {
                 return false;
             }
@@ -452,8 +604,8 @@ public class ColumnTypeConverter {
 
         if (type.isMapType()) {
             if (otherType.isMapType()) {
-                return validateHiveColumnType(((MapType) type).getKeyType(), ((MapType) otherType).getKeyType()) &&
-                        validateHiveColumnType(((MapType) type).getValueType(), ((MapType) otherType).getValueType());
+                return validateColumnType(((MapType) type).getKeyType(), ((MapType) otherType).getKeyType()) &&
+                        validateColumnType(((MapType) type).getValueType(), ((MapType) otherType).getValueType());
             } else {
                 return false;
             }
@@ -464,7 +616,7 @@ public class ColumnTypeConverter {
                 StructType structType = (StructType) type;
                 StructType otherStructType = (StructType) otherType;
                 for (int i = 0; i < structType.getFields().size(); i++) {
-                    if (!validateHiveColumnType(
+                    if (!validateColumnType(
                             structType.getField(i).getType(),
                             otherStructType.getField(i).getType())) {
                         return false;
@@ -515,18 +667,7 @@ public class ColumnTypeConverter {
             return false;
         }
 
-        if (base.getStrLen() != other.getStrLen()) {
-            return false;
-        }
-
-        if (base.getPrecision() != other.getPrecision()) {
-            return false;
-        }
-
-        if (base.getScale() != other.getScale()) {
-            return false;
-        }
-
         return true;
     }
 }
+

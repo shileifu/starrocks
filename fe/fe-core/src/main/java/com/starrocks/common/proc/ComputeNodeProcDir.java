@@ -24,6 +24,7 @@ import com.starrocks.common.util.ListComparator;
 import com.starrocks.common.util.TimeUtils;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.system.ComputeNode;
+import com.starrocks.system.DataNodeCoreStat;
 import com.starrocks.system.SystemInfoService;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -41,7 +42,9 @@ public class ComputeNodeProcDir implements ProcDirInterface {
             .add("ComputeNodeId").add("IP").add("HeartbeatPort")
             .add("BePort").add("HttpPort").add("BrpcPort").add("LastStartTime").add("LastHeartbeat").add("Alive")
             .add("SystemDecommissioned").add("ClusterDecommissioned").add("ErrMsg")
-            .add("Version").build();
+            .add("Version")
+            .add("CpuCores").add("NumRunningQueries").add("MemUsedPct").add("CpuUsedPct")
+            .build();
 
     private SystemInfoService clusterInfoService;
 
@@ -114,6 +117,13 @@ public class ComputeNodeProcDir implements ProcDirInterface {
 
             computeNodeInfo.add(computeNode.getHeartbeatErrMsg());
             computeNodeInfo.add(computeNode.getVersion());
+
+            computeNodeInfo.add(DataNodeCoreStat.getCoresOfBe(computeNodeId));
+
+            computeNodeInfo.add(computeNode.getNumRunningQueries());
+            double memUsedPct = computeNode.getMemUsedPct();
+            computeNodeInfo.add(String.format("%.2f", memUsedPct * 100) + " %");
+            computeNodeInfo.add(String.format("%.1f", computeNode.getCpuUsedPermille() / 10.0) + " %");
 
             comparableComputeNodeInfos.add(computeNodeInfo);
         }

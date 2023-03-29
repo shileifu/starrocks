@@ -68,7 +68,7 @@ import com.starrocks.fs.HdfsUtil;
 import com.starrocks.load.BrokerFileGroup;
 import com.starrocks.load.Load;
 import com.starrocks.server.GlobalStateMgr;
-import com.starrocks.system.Backend;
+import com.starrocks.system.DataNode;
 import com.starrocks.thrift.TBrokerFileStatus;
 import com.starrocks.thrift.TBrokerRangeDesc;
 import com.starrocks.thrift.TBrokerScanRange;
@@ -144,7 +144,7 @@ public class FileScanNode extends LoadScanNode {
     private int filesAdded;
 
     // Only used for external table in select statement
-    private List<Backend> backends;
+    private List<DataNode> backends;
     private int nextBe = 0;
 
     private Analyzer analyzer;
@@ -155,6 +155,7 @@ public class FileScanNode extends LoadScanNode {
     // 3. use vectorized engine
     private boolean useVectorizedLoad;
 
+    private boolean nullExprInAutoIncrement;
     private static class ParamCreateContext {
         public BrokerFileGroup fileGroup;
         public TBrokerScanRangeParams params;
@@ -173,6 +174,7 @@ public class FileScanNode extends LoadScanNode {
         this.filesAdded = filesAdded;
         this.parallelInstanceNum = 1;
         this.useVectorizedLoad = false;
+        this.nullExprInAutoIncrement = true;
     }
 
     @Override
@@ -242,6 +244,10 @@ public class FileScanNode extends LoadScanNode {
         this.useVectorizedLoad = useVectorizedLoad;
     }
 
+    public boolean nullExprInAutoIncrement() {
+        return nullExprInAutoIncrement;
+    }
+
     // Called from init, construct source tuple information
     private void initParams(ParamCreateContext context)
             throws UserException {
@@ -279,6 +285,10 @@ public class FileScanNode extends LoadScanNode {
         params.setStrict_mode(strictMode);
         params.setProperties(brokerDesc.getProperties());
         params.setUse_broker(brokerDesc.hasBroker());
+        params.setSkip_header(fileGroup.getSkipHeader());
+        params.setTrim_space(fileGroup.isTrimspace());
+        params.setEnclose(fileGroup.getEnclose());
+        params.setEscape(fileGroup.getEscape());
         initColumns(context);
         initWhereExpr(fileGroup.getWhereExpr(), analyzer);
     }
@@ -348,8 +358,9 @@ public class FileScanNode extends LoadScanNode {
                                     + column.getDefaultExpr().getExpr());
                         }
                     } else if (defaultValueType == Column.DefaultValueType.NULL) {
-                        if (column.isAllowNull()) {
+                        if (column.isAllowNull() || column.isAutoIncrement()) {
                             expr = NullLiteral.create(column.getType());
+                            nullExprInAutoIncrement = false;
                         } else {
                             throw new UserException("Unknown slot ref("
                                     + destSlotDesc.getColumn().getName() + ") in source file");
@@ -394,7 +405,7 @@ public class FileScanNode extends LoadScanNode {
 
     private TScanRangeLocations newLocations(TBrokerScanRangeParams params, String brokerName, boolean hasBroker)
             throws UserException {
-        Backend selectedBackend = backends.get(nextBe++);
+        DataNode selectedBackend = backends.get(nextBe++);
         nextBe = nextBe % backends.size();
 
         // Generate on broker scan range
@@ -485,7 +496,7 @@ public class FileScanNode extends LoadScanNode {
 
     private void assignBackends() throws UserException {
         backends = Lists.newArrayList();
-        for (Backend be : GlobalStateMgr.getCurrentSystemInfo().getIdToBackend().values()) {
+        for (DataNode be : GlobalStateMgr.getCurrentSystemInfo().getIdToBackend().values()) {
             if (be.isAvailable()) {
                 backends.add(be);
             }
@@ -671,7 +682,7 @@ public class FileScanNode extends LoadScanNode {
             return;
         }
 
-        Set<Long> aliveBes = backends.stream().map(Backend::getId).collect(Collectors.toSet());
+        Set<Long> aliveBes = backends.stream().map(DataNode::getId).collect(Collectors.toSet());
         nextBe = 0;
         for (TScanRangeLocations locations : locationsList) {
             TScanRangeLocation scanRangeLocation = locations.getLocations().get(0);

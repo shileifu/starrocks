@@ -44,6 +44,7 @@ import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 import com.starrocks.thrift.TFunction;
 import com.starrocks.thrift.TFunctionBinaryType;
+import org.apache.commons.lang.ArrayUtils;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -143,6 +144,7 @@ public class Function implements Writable {
 
     public Function(long id, FunctionName name, Type[] argTypes, Type retType, boolean hasVarArgs) {
         this.id = id;
+        this.functionId = id;
         this.name = name;
         this.hasVarArgs = hasVarArgs;
         if (argTypes == null) {
@@ -155,16 +157,34 @@ public class Function implements Writable {
     }
 
     public Function(long id, FunctionName name, List<Type> argTypes, Type retType, boolean hasVarArgs) {
+        this.id = id;
         this.functionId = id;
         this.name = name;
         this.hasVarArgs = hasVarArgs;
         if (argTypes == null) {
             this.argTypes = new Type[0];
         } else {
-            this.argTypes = argTypes.toArray(new Type[argTypes.size()]);
+            this.argTypes = argTypes.toArray(new Type[0]);
         }
         this.retType = retType;
         this.isPolymorphic = Arrays.stream(this.argTypes).anyMatch(Type::isPseudoType);
+    }
+
+    // copy constructor
+    public Function(Function other) {
+        id = other.id;
+        name = other.name;
+        retType = other.retType;
+        argTypes = other.argTypes;
+        hasVarArgs = other.hasVarArgs;
+        userVisible = other.userVisible;
+        location = other.location;
+        binaryType = other.binaryType;
+        checksum = other.checksum;
+        functionId = other.functionId;
+        isPolymorphic = other.isPolymorphic;
+        couldApplyDictOptimize = other.couldApplyDictOptimize;
+        isNullable = other.isNullable;
     }
 
     public FunctionName getFunctionName() {
@@ -262,6 +282,10 @@ public class Function implements Writable {
 
     public String getChecksum() {
         return checksum;
+    }
+
+    public void setRetType(Type retType) {
+        this.retType = retType;
     }
 
     // TODO(cmy): Currently we judge whether it is UDF by wheter the 'location' is set.
@@ -751,6 +775,22 @@ public class Function implements Writable {
             return true;
         }
         return obj != null && obj.getClass() == this.getClass() && isIdentical((Function) obj);
+    }
+
+
+    // just shallow copy
+    public Function copy() {
+        return new Function(this);
+    }
+
+    public Function updateArgType(Type[] newTypes) {
+        if (!ArrayUtils.isEquals(argTypes, newTypes)) {
+            Function newFunc = copy();
+            newFunc.setArgsType(newTypes);
+            return newFunc;
+        }
+
+        return this;
     }
 
 }

@@ -46,11 +46,14 @@
 #include "exec/pipeline/driver_limiter.h"
 #include "exec/pipeline/pipeline_driver_executor.h"
 #include "exec/pipeline/query_context.h"
+#include "exec/spill/dir_manager.h"
+#include "exec/spill/query_spill_manager.h"
 #include "exec/workgroup/scan_executor.h"
 #include "exec/workgroup/work_group.h"
 #include "exec/workgroup/work_group_fwd.h"
 #include "gen_cpp/BackendService.h"
 #include "gen_cpp/TFileBrokerService.h"
+#include "gutil/strings/join.h"
 #include "gutil/strings/substitute.h"
 #include "runtime/broker_mgr.h"
 #include "runtime/client_cache.h"
@@ -138,8 +141,15 @@ static int64_t calc_max_consistency_memory(int64_t process_mem_limit) {
     return std::min<int64_t>(limit, process_mem_limit * percent / 100);
 }
 
+bool ExecEnv::_is_init = false;
+
 Status ExecEnv::init(ExecEnv* env, const std::vector<StorePath>& store_paths) {
+    DeferOp op([]() { ExecEnv::_is_init = true; });
     return env->_init(store_paths);
+}
+
+bool ExecEnv::is_init() {
+    return _is_init;
 }
 
 Status ExecEnv::_init(const std::vector<StorePath>& store_paths) {
@@ -161,6 +171,13 @@ Status ExecEnv::_init(const std::vector<StorePath>& store_paths) {
 
     _udf_call_pool = new PriorityThreadPool("udf", config::udf_thread_pool_size, config::udf_thread_pool_size);
     _fragment_mgr = new FragmentMgr(this);
+
+    RETURN_IF_ERROR(ThreadPoolBuilder("automatic_partition") // automatic partition pool
+                            .set_min_threads(0)
+                            .set_max_threads(8)
+                            .set_max_queue_size(1000)
+                            .set_idle_timeout(MonoDelta::FromMilliseconds(2000))
+                            .build(&_automatic_partition_pool));
 
     int num_prepare_threads = config::pipeline_prepare_thread_pool_thread_num;
     if (num_prepare_threads <= 0) {
@@ -227,8 +244,7 @@ Status ExecEnv::_init(const std::vector<StorePath>& store_paths) {
                             .set_idle_timeout(MonoDelta::FromMilliseconds(2000))
                             .build(&connector_scan_worker_thread_pool_without_workgroup));
     _connector_scan_executor_without_workgroup = new workgroup::ScanExecutor(
-            std::move(connector_scan_worker_thread_pool_without_workgroup),
-            std::make_unique<workgroup::PriorityScanTaskQueue>(config::pipeline_scan_thread_pool_queue_size));
+            std::move(connector_scan_worker_thread_pool_without_workgroup), workgroup::create_scan_task_queue());
     _connector_scan_executor_without_workgroup->initialize(connector_num_io_threads);
 
     std::unique_ptr<ThreadPool> connector_scan_worker_thread_pool_with_workgroup;
@@ -278,9 +294,8 @@ Status ExecEnv::_init(const std::vector<StorePath>& store_paths) {
                             .set_max_queue_size(1000)
                             .set_idle_timeout(MonoDelta::FromMilliseconds(2000))
                             .build(&scan_worker_thread_pool_without_workgroup));
-    _scan_executor_without_workgroup = new workgroup::ScanExecutor(
-            std::move(scan_worker_thread_pool_without_workgroup),
-            std::make_unique<workgroup::PriorityScanTaskQueue>(config::pipeline_scan_thread_pool_queue_size));
+    _scan_executor_without_workgroup = new workgroup::ScanExecutor(std::move(scan_worker_thread_pool_without_workgroup),
+                                                                   workgroup::create_scan_task_queue());
     _scan_executor_without_workgroup->initialize(num_io_threads);
 
     std::unique_ptr<ThreadPool> scan_worker_thread_pool_with_workgroup;
@@ -297,7 +312,8 @@ Status ExecEnv::_init(const std::vector<StorePath>& store_paths) {
     _scan_executor_with_workgroup->initialize(num_io_threads);
 
     // it means acting as compute node while store_path is empty. some threads are not needed for that case.
-    if (!store_paths.empty()) {
+    bool is_compute_node = store_paths.empty();
+    if (!is_compute_node) {
         Status status = _load_path_mgr->init();
         if (!status.ok()) {
             LOG(ERROR) << "load path mgr init failed." << status.get_error_msg();
@@ -305,31 +321,43 @@ Status ExecEnv::_init(const std::vector<StorePath>& store_paths) {
         }
 #if defined(USE_STAROS) && !defined(BE_TEST)
         _lake_location_provider = new lake::StarletLocationProvider();
-        _lake_update_manager = new lake::UpdateManager(_lake_location_provider);
+        _lake_update_manager = new lake::UpdateManager(_lake_location_provider, update_mem_tracker());
         _lake_tablet_manager = new lake::TabletManager(_lake_location_provider, _lake_update_manager,
                                                        config::lake_metadata_cache_limit);
+        if (config::starlet_cache_dir.empty()) {
+            std::vector<std::string> starlet_cache_paths;
+            std::for_each(store_paths.begin(), store_paths.end(), [&](StorePath root_path) {
+                std::string starlet_cache_path = root_path.path + "/starlet_cache";
+                starlet_cache_paths.emplace_back(starlet_cache_path);
+            });
+            config::starlet_cache_dir = JoinStrings(starlet_cache_paths, ":");
+        }
 #elif defined(BE_TEST)
         _lake_location_provider = new lake::FixedLocationProvider(_store_paths.front().path);
-        _lake_update_manager = new lake::UpdateManager(_lake_location_provider);
+        _lake_update_manager = new lake::UpdateManager(_lake_location_provider, update_mem_tracker());
         _lake_tablet_manager = new lake::TabletManager(_lake_location_provider, _lake_update_manager,
                                                        config::lake_metadata_cache_limit);
 #endif
-
-        // agent_server is not needed for cn
-        _agent_server = new AgentServer(this);
-        _agent_server->init_or_die();
 
 #if defined(USE_STAROS) && !defined(BE_TEST)
         _lake_tablet_manager->start_gc();
 #endif
     }
+
+    _agent_server = new AgentServer(this, is_compute_node);
+    _agent_server->init_or_die();
+
     _broker_mgr->init();
     _small_file_mgr->init();
 
     RETURN_IF_ERROR(_load_channel_mgr->init(load_mem_tracker()));
+
     _heartbeat_flags = new HeartbeatFlags();
     auto capacity = std::max<size_t>(config::query_cache_capacity, 4L * 1024 * 1024);
     _cache_mgr = new query_cache::CacheManager(capacity);
+
+    _spill_dir_mgr = std::make_shared<spill::DirManager>();
+    RETURN_IF_ERROR(_spill_dir_mgr->init());
     return Status::OK();
 }
 
@@ -345,7 +373,7 @@ void ExecEnv::add_rf_event(const RfTracePoint& pt) {
 
 class SetMemTrackerForColumnPool {
 public:
-    SetMemTrackerForColumnPool(MemTracker* mem_tracker) : _mem_tracker(mem_tracker) {}
+    SetMemTrackerForColumnPool(std::shared_ptr<MemTracker> mem_tracker) : _mem_tracker(std::move(mem_tracker)) {}
 
     template <typename Pool>
     void operator()() {
@@ -353,7 +381,7 @@ public:
     }
 
 private:
-    MemTracker* _mem_tracker = nullptr;
+    std::shared_ptr<MemTracker> _mem_tracker = nullptr;
 };
 
 Status ExecEnv::init_mem_tracker() {
@@ -417,7 +445,7 @@ Status ExecEnv::init_mem_tracker() {
 
     MemChunkAllocator::init_instance(_chunk_allocator_mem_tracker.get(), config::chunk_reserved_bytes_limit);
 
-    SetMemTrackerForColumnPool op(column_pool_mem_tracker());
+    SetMemTrackerForColumnPool op(_column_pool_mem_tracker);
     ForEach<ColumnPoolList>(op);
     _init_storage_page_cache();
     return Status::OK();
@@ -458,6 +486,10 @@ Status ExecEnv::_init_storage_page_cache() {
 }
 
 void ExecEnv::_destroy() {
+    if (_automatic_partition_pool) {
+        _automatic_partition_pool->shutdown();
+    }
+
     SAFE_DELETE(_agent_server);
     SAFE_DELETE(_runtime_filter_worker);
     SAFE_DELETE(_profile_report_worker);

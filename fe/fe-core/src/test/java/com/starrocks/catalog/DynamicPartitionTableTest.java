@@ -253,7 +253,7 @@ public class DynamicPartitionTableTest {
                 ");");
         Database db = GlobalStateMgr.getCurrentState().getDb("test");
         OlapTable table = (OlapTable) db.getTable("dynamic_partition_buckets");
-        Assert.assertEquals(table.getTableProperty().getDynamicPartitionProperty().getBuckets(), 32);
+        Assert.assertEquals(table.getTableProperty().getDynamicPartitionProperty().getBuckets(), 0);
     }
 
     @Test
@@ -453,7 +453,7 @@ public class DynamicPartitionTableTest {
                 "DISTRIBUTED BY HASH(`k1`) BUCKETS 32\n" +
                 "PROPERTIES (\n" +
                 "\"replication_num\" = \"1\",\n" +
-                "\"dynamic_partition.enable\" = \"true\",\n" +
+                "\"dynamic_partition.enable\" = \"false\",\n" +
                 "\"dynamic_partition.start\" = \"-3\",\n" +
                 "\"dynamic_partition.end\" = \"3\",\n" +
                 "\"dynamic_partition.time_unit\" = \"day\",\n" +

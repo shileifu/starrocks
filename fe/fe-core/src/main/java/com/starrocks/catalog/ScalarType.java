@@ -274,6 +274,12 @@ public class ScalarType extends Type implements Cloneable {
         return stringType;
     }
 
+    public static ScalarType createMaxVarcharType() {
+        ScalarType stringType = ScalarType.createVarcharType(ScalarType.MAX_VARCHAR_LENGTH);
+        stringType.setAssignedStrLenInColDefinition();
+        return stringType;
+    }
+
     public static ScalarType createVarcharType(int len) {
         // length checked in analysis
         ScalarType type = new ScalarType(PrimitiveType.VARCHAR);
@@ -744,18 +750,18 @@ public class ScalarType extends Type implements Cloneable {
         if (t.isPseudoType()) {
             return t.matchesType(this);
         }
+        if (isDecimalV2() && t.isDecimalV2()) {
+            return true;
+        }
+        if (this.isStringType() && t.isStringType()) {
+            return true;
+        }
         if (this.getPrimitiveType() == t.getPrimitiveType()) {
             Preconditions.checkArgument(t.isScalarType());
             return !this.isDecimalV3()
                     || t.isWildcardDecimal()
                     || this.isWildcardDecimal()
                     || (getScalarScale() == ((ScalarType) t).getScalarScale());
-        }
-        if (this.isStringType() && t.isStringType()) {
-            return true;
-        }
-        if (isDecimalV2() && t.isDecimalV2()) {
-            return true;
         }
         return false;
     }

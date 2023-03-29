@@ -29,8 +29,11 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
+
+import static com.starrocks.sql.common.ErrorMsgProxy.PARSER_ERROR_MSG;
 
 public class CatalogUtils {
 
@@ -89,21 +92,90 @@ public class CatalogUtils {
                 return;
             }
             if (table.isLakeTable()) {
-                throw new AnalysisException("Unsupported operation on lake table [" + dbName + "." + tableName + "]");
+                throw new AnalysisException(PARSER_ERROR_MSG.unsupportedOpWithInfo("lake table " + db + "." + tableName));
             }
         } finally {
             db.readUnlock();
         }
     }
 
-    public static void checkPartitionValuesExistForAddListPartition(OlapTable olapTable, PartitionDesc partitionDesc)
+    public static void checkPartitionValuesExistForReplaceListPartition(ListPartitionInfo listPartitionInfo,
+                                                                        Partition partition)
+            throws DdlException {
+        try {
+            List<Long> partitionIds = listPartitionInfo.getPartitionIds(false);
+            Map<Long, List<LiteralExpr>> literalExprValues = listPartitionInfo.getLiteralExprValues();
+            Map<Long, List<List<LiteralExpr>>> multiLiteralExprValues = listPartitionInfo.getMultiLiteralExprValues();
+
+            List<LiteralExpr> literalExprs = listPartitionInfo.getLiteralExprValues().get(partition.getId());
+            List<List<LiteralExpr>> multiLiteral = listPartitionInfo.getMultiLiteralExprValues().get(partition.getId());
+            if (!literalExprValues.isEmpty()) {
+                listPartitionInfo.setBatchLiteralExprValues(listPartitionInfo.getIdToValues());
+                List<LiteralExpr> allLiteralExprValues = Lists.newArrayList();
+                literalExprValues.forEach((k, v) -> {
+                    if (partitionIds.contains(k)) {
+                        allLiteralExprValues.addAll(v);
+                    }
+                });
+                if (literalExprs != null) {
+                    for (LiteralExpr item : literalExprs) {
+                        for (LiteralExpr value : allLiteralExprValues) {
+                            if (item.getStringValue().equals(value.getStringValue())) {
+                                throw new DdlException("Duplicate partition value %s");
+                            }
+                        }
+                    }
+                }
+            } else if (!multiLiteralExprValues.isEmpty()) {
+                listPartitionInfo.setBatchMultiLiteralExprValues(listPartitionInfo.getIdToMultiValues());
+                List<List<LiteralExpr>> allMultiLiteralExprValues = Lists.newArrayList();
+                listPartitionInfo.getMultiLiteralExprValues().forEach((k, v) -> {
+                    if (partitionIds.contains(k)) {
+                        allMultiLiteralExprValues.addAll(v);
+                    }
+                });
+
+                int partitionColSize = listPartitionInfo.getPartitionColumns().size();
+                for (List<LiteralExpr> itemExpr : multiLiteral) {
+                    for (List<LiteralExpr> valueExpr : allMultiLiteralExprValues) {
+                        int duplicatedSize = 0;
+                        for (int i = 0; i < itemExpr.size(); i++) {
+                            String itemValue = itemExpr.get(i).getStringValue();
+                            String value = valueExpr.get(i).getStringValue();
+                            if (value.equals(itemValue)) {
+                                duplicatedSize++;
+                            }
+                        }
+                        if (duplicatedSize == partitionColSize) {
+                            List<String> msg = itemExpr.stream()
+                                    .map(value -> ("\"" + value.getStringValue() + "\""))
+                                    .collect(Collectors.toList());
+                            throw new DdlException("Duplicate values " +
+                                    "(" + String.join(",", msg) + ") ");
+                        }
+                    }
+                }
+            }
+        } catch (AnalysisException e) {
+            throw new DdlException(e.getMessage());
+        }
+    }
+
+    public static void checkPartitionValuesExistForAddListPartition(OlapTable olapTable, PartitionDesc partitionDesc,
+                                                                    boolean isTemp)
             throws DdlException {
         try {
             ListPartitionInfo listPartitionInfo = (ListPartitionInfo) olapTable.getPartitionInfo();
+            List<Long> partitionIds = listPartitionInfo.getPartitionIds(isTemp);
+
             if (partitionDesc instanceof SingleItemListPartitionDesc) {
                 listPartitionInfo.setBatchLiteralExprValues(listPartitionInfo.getIdToValues());
                 List<LiteralExpr> allLiteralExprValues = Lists.newArrayList();
-                listPartitionInfo.getLiteralExprValues().forEach((k, v) -> allLiteralExprValues.addAll(v));
+                listPartitionInfo.getLiteralExprValues().forEach((k, v) -> {
+                    if (partitionIds.contains(k)) {
+                        allLiteralExprValues.addAll(v);
+                    }
+                });
 
                 SingleItemListPartitionDesc singleItemListPartitionDesc = (SingleItemListPartitionDesc) partitionDesc;
                 for (LiteralExpr item : singleItemListPartitionDesc.getLiteralExprValues()) {
@@ -116,7 +188,11 @@ public class CatalogUtils {
             } else if (partitionDesc instanceof MultiItemListPartitionDesc) {
                 listPartitionInfo.setBatchMultiLiteralExprValues(listPartitionInfo.getIdToMultiValues());
                 List<List<LiteralExpr>> allMultiLiteralExprValues = Lists.newArrayList();
-                listPartitionInfo.getMultiLiteralExprValues().forEach((k, v) -> allMultiLiteralExprValues.addAll(v));
+                listPartitionInfo.getMultiLiteralExprValues().forEach((k, v) -> {
+                    if (partitionIds.contains(k)) {
+                        allMultiLiteralExprValues.addAll(v);
+                    }
+                });
 
                 int partitionColSize = listPartitionInfo.getPartitionColumns().size();
                 MultiItemListPartitionDesc multiItemListPartitionDesc = (MultiItemListPartitionDesc) partitionDesc;
@@ -150,15 +226,16 @@ public class CatalogUtils {
         // When POC, the backends is not greater than three most of the time.
         // The bucketNum will be given a small multiplier factor for small backends.
         int bucketNum = 0;
-        if (backendNum <= 3) {
+        if (backendNum <= 12) {
             bucketNum = 2 * backendNum;
-        } else if (backendNum <= 6) {
-            bucketNum = backendNum;
-        } else if (backendNum <= 12) {
-            bucketNum = 12;
+        } else if (backendNum <= 24) {
+            bucketNum = (int) (1.5 * backendNum);
+        } else if (backendNum <= 36) {
+            bucketNum = 36;
         } else {
             bucketNum = Math.min(backendNum, 48);
         }
         return bucketNum;
+
     }
 }

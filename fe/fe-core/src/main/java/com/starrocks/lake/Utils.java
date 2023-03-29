@@ -17,6 +17,7 @@ package com.starrocks.lake;
 
 import com.google.common.collect.Lists;
 import com.starrocks.catalog.MaterializedIndex;
+import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.Tablet;
 import com.starrocks.common.NoAliveBackendException;
@@ -29,7 +30,7 @@ import com.starrocks.rpc.BrpcProxy;
 import com.starrocks.rpc.LakeService;
 import com.starrocks.rpc.RpcException;
 import com.starrocks.server.GlobalStateMgr;
-import com.starrocks.system.Backend;
+import com.starrocks.system.DataNode;
 import com.starrocks.system.SystemInfoService;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
@@ -64,7 +65,7 @@ public class Utils {
 
     // Preconditions: Has required the database's reader lock.
     // Returns a map from backend ID to a list of tablet IDs.
-    public static Map<Long, List<Long>> groupTabletID(LakeTable table) throws NoAliveBackendException {
+    public static Map<Long, List<Long>> groupTabletID(OlapTable table) throws NoAliveBackendException {
         return groupTabletID(table.getPartitions(), MaterializedIndex.IndexExtState.ALL);
     }
 
@@ -105,9 +106,9 @@ public class Utils {
         List<Long> txnIds = Lists.newArrayList(txnId);
         SystemInfoService systemInfoService = GlobalStateMgr.getCurrentSystemInfo();
         List<Future<PublishVersionResponse>> responseList = Lists.newArrayListWithCapacity(beToTablets.size());
-        List<Backend> backendList = Lists.newArrayListWithCapacity(beToTablets.size());
+        List<DataNode> backendList = Lists.newArrayListWithCapacity(beToTablets.size());
         for (Map.Entry<Long, List<Long>> entry : beToTablets.entrySet()) {
-            Backend backend = systemInfoService.getBackend(entry.getKey());
+            DataNode backend = systemInfoService.getBackend(entry.getKey());
             if (backend == null) {
                 throw new NoAliveBackendException("Backend been dropped while building publish version request");
             }
@@ -155,9 +156,9 @@ public class Utils {
         }
         SystemInfoService systemInfoService = GlobalStateMgr.getCurrentSystemInfo();
         List<Future<PublishLogVersionResponse>> responseList = Lists.newArrayListWithCapacity(beToTablets.size());
-        List<Backend> backendList = Lists.newArrayListWithCapacity(beToTablets.size());
+        List<DataNode> backendList = Lists.newArrayListWithCapacity(beToTablets.size());
         for (Map.Entry<Long, List<Long>> entry : beToTablets.entrySet()) {
-            Backend backend = systemInfoService.getBackend(entry.getKey());
+            DataNode backend = systemInfoService.getBackend(entry.getKey());
             if (backend == null) {
                 throw new NoAliveBackendException("Backend been dropped while building publish version request");
             }

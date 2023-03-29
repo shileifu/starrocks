@@ -37,7 +37,7 @@ import com.starrocks.catalog.TabletInvertedIndex;
 import com.starrocks.catalog.TabletMeta;
 import com.starrocks.common.Config;
 import com.starrocks.server.GlobalStateMgr;
-import com.starrocks.system.Backend;
+import com.starrocks.system.DataNode;
 import com.starrocks.system.SystemInfoService;
 import com.starrocks.thrift.TStorageMedium;
 import mockit.Expectations;
@@ -183,6 +183,10 @@ public class DiskAndTabletLoadReBalancerTest {
         Assert.assertTrue(tablets.stream().allMatch(t -> (t.getDestBackendId() == beId3)));
         Assert.assertTrue(tablets.stream().anyMatch(t -> (t.getSrcBackendId() == beId1)));
         Assert.assertTrue(tablets.stream().anyMatch(t -> (t.getSrcBackendId() == beId2)));
+
+        // set table state to schema_change, balance should be ignored
+        table.setState(OlapTable.OlapTableState.SCHEMA_CHANGE);
+        Assert.assertEquals(0, rebalancer.selectAlternativeTablets().size());
     }
 
     /**
@@ -368,7 +372,7 @@ public class DiskAndTabletLoadReBalancerTest {
         long pathHash20 = 20L;
         long pathHash21 = 21L;
 
-        Backend be1 = genBackend(beId1, "host1", 2 * tabletDataSize,
+        DataNode be1 = genBackend(beId1, "host1", 2 * tabletDataSize,
                 2 * tabletDataSize, 4 * tabletDataSize, pathHash10);
         DiskInfo disk10 = genDiskInfo(2 * tabletDataSize, 2 * tabletDataSize,
                 4 * tabletDataSize, "/data10", pathHash10, TStorageMedium.HDD);
@@ -388,7 +392,7 @@ public class DiskAndTabletLoadReBalancerTest {
         diskInfoMap1.put(disk14.getRootPath(), disk14);
         be1.setDisks(ImmutableMap.copyOf(diskInfoMap1));
 
-        Backend be2 = genBackend(beId2, "host2", 6 * tabletDataSize,
+        DataNode be2 = genBackend(beId2, "host2", 6 * tabletDataSize,
                 2 * tabletDataSize, 8 * tabletDataSize, pathHash20);
         DiskInfo disk20 = genDiskInfo(6 * tabletDataSize, 2 * tabletDataSize,
                 8 * tabletDataSize, "/data20", pathHash20, TStorageMedium.HDD);
@@ -519,11 +523,15 @@ public class DiskAndTabletLoadReBalancerTest {
         Assert.assertTrue(tablets.stream().anyMatch(t -> (t.getDestPathHash() == pathHash14)));
         Assert.assertTrue(tablets.stream().anyMatch(t -> (t.getSrcPathHash() == pathHash10)));
         Assert.assertTrue(tablets.stream().anyMatch(t -> (t.getSrcPathHash() == pathHash13)));
+
+        // set table state to schema_change, balance should be ignored
+        table.setState(OlapTable.OlapTableState.SCHEMA_CHANGE);
+        Assert.assertEquals(0, rebalancer.selectAlternativeTablets().size());
     }
 
-    private Backend genBackend(long beId, String host, long availableCapB, long dataUsedCapB, long totalCapB,
-                               long pathHash) {
-        Backend backend = new Backend(beId, host, 0);
+    private DataNode genBackend(long beId, String host, long availableCapB, long dataUsedCapB, long totalCapB,
+                                long pathHash) {
+        DataNode backend = new DataNode(beId, host, 0);
         backend.updateOnce(0, 0, 0);
         DiskInfo diskInfo = new DiskInfo("/data");
         diskInfo.setAvailableCapacityB(availableCapB);

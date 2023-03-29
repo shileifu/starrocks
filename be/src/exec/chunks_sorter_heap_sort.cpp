@@ -45,7 +45,8 @@ Status ChunksSorterHeapSort::update(RuntimeState* state, const ChunkPtr& chunk) 
     int row_sz = chunk_holder->value()->chunk->num_rows();
     if (_sort_heap == nullptr) {
         _sort_heap = std::make_unique<CommonCursorSortHeap>(detail::ChunkCursorComparator(_sort_desc));
-        _sort_heap->reserve(_number_of_rows_to_sort());
+        // avoid exaggerated limit + offset, for an example select * from t order by col limit 9223372036854775800,1
+        _sort_heap->reserve(std::min<size_t>(_number_of_rows_to_sort(), 10'000'000ul));
         // build heap
         size_t direct_push = std::min<size_t>(_number_of_rows_to_sort(), row_sz);
         size_t i = 0;
@@ -176,7 +177,7 @@ std::vector<JoinRuntimeFilter*>* ChunksSorterHeapSort::runtime_filters(ObjectPoo
     if (_runtime_filter.empty()) {
         auto rf = type_dispatch_predicate<JoinRuntimeFilter*>(
                 (*_sort_exprs)[0]->root()->type().type, false, detail::SortRuntimeFilterBuilder(), pool,
-                top_cursor_column, cursor_rid, _sort_desc.descs[0].asc_order());
+                top_cursor_column, cursor_rid, _sort_desc.descs[0].asc_order(), false);
         _runtime_filter.emplace_back(rf);
     } else {
         type_dispatch_predicate<std::nullptr_t>((*_sort_exprs)[0]->root()->type().type, false,
@@ -289,8 +290,8 @@ int ChunksSorterHeapSort::_filter_data(detail::ChunkHolder* chunk_holder, int ro
     return chunk_holder->value()->chunk->filter(filter);
 }
 
-void ChunksSorterHeapSort::setup_runtime(RuntimeProfile* profile) {
-    ChunksSorter::setup_runtime(profile);
+void ChunksSorterHeapSort::setup_runtime(RuntimeProfile* profile, MemTracker* parent_mem_tracker) {
+    ChunksSorter::setup_runtime(profile, parent_mem_tracker);
     _sort_filter_costs = ADD_TIMER(profile, "SortFilterCost");
     _sort_filter_rows = ADD_COUNTER(profile, "SortFilterRows", TUnit::UNIT);
 }

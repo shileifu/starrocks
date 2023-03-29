@@ -16,10 +16,10 @@
 package com.starrocks.system;
 
 import com.starrocks.cluster.Cluster;
-import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
 import com.starrocks.persist.EditLog;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.RunMode;
 import com.starrocks.service.FrontendOptions;
 import com.starrocks.sql.ast.ModifyBackendAddressClause;
 import mockit.Expectations;
@@ -34,6 +34,7 @@ import java.lang.reflect.Field;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.List;
+import java.util.stream.Collectors;
 
 public class SystemInfoServiceTest {
 
@@ -71,7 +72,7 @@ public class SystemInfoServiceTest {
         };
         new MockUp<EditLog>() {
             @Mock
-            public void logBackendStateChange(Backend be) {
+            public void logBackendStateChange(DataNode be) {
             }
         };
     }
@@ -79,30 +80,30 @@ public class SystemInfoServiceTest {
     @Test
     public void testUpdateBackendHostWithOneBe() throws Exception {
         mockFunc();
-        Backend be = new Backend(100, "127.0.0.1", 1000);
+        DataNode be = new DataNode(100, "127.0.0.1", 1000);
         service.addBackend(be);
         ModifyBackendAddressClause clause = new ModifyBackendAddressClause("127.0.0.1", "sandbox");
         service.modifyBackendHost(clause);
-        Backend backend = service.getBackendWithHeartbeatPort("sandbox", 1000);
+        DataNode backend = service.getBackendWithHeartbeatPort("sandbox", 1000);
         Assert.assertNotNull(backend);
     }
 
     @Test
     public void testUpdateBackendHostWithMoreBe() throws Exception {
         mockFunc();
-        Backend be1 = new Backend(100, "127.0.0.1", 1000);
-        Backend be2 = new Backend(101, "127.0.0.1", 1001);
+        DataNode be1 = new DataNode(100, "127.0.0.1", 1000);
+        DataNode be2 = new DataNode(101, "127.0.0.1", 1001);
         service.addBackend(be1);
         service.addBackend(be2);
         ModifyBackendAddressClause clause = new ModifyBackendAddressClause("127.0.0.1", "sandbox");
         service.modifyBackendHost(clause);
-        Backend backend = service.getBackendWithHeartbeatPort("sandbox", 1000);
+        DataNode backend = service.getBackendWithHeartbeatPort("sandbox", 1000);
         Assert.assertNotNull(backend);
     }
 
     @Test(expected = DdlException.class)
     public void testUpdateBackendAddressNotFoundBe() throws Exception {
-        Backend be = new Backend(100, "originalHost", 1000);
+        DataNode be = new DataNode(100, "originalHost", 1000);
         service.addBackend(be);
         ModifyBackendAddressClause clause = new ModifyBackendAddressClause("originalHost-test", "sandbox");
         // This case will occur backend [%s] not found exception
@@ -111,17 +112,40 @@ public class SystemInfoServiceTest {
 
     @Test
     public void testUpdateBackend() throws Exception {
-        Backend be = new Backend(10001, "newHost", 1000);
+        DataNode be = new DataNode(10001, "newHost", 1000);
         service.addBackend(be);
         service.updateBackendState(be);
-        Backend newBe = service.getBackend(10001);
+        DataNode newBe = service.getBackend(10001);
         Assert.assertTrue(newBe.getHost().equals("newHost"));
     }
 
     @Test
+    public void testGetBackendOrComputeNode() {
+        DataNode be = new DataNode(10001, "host1", 1000);
+        service.addBackend(be);
+        ComputeNode cn = new ComputeNode(10002, "host2", 1000);
+        service.addComputeNode(cn);
+
+        Assert.assertEquals(be, service.getBackendOrComputeNode(be.getId()));
+        Assert.assertEquals(cn, service.getBackendOrComputeNode(cn.getId()));
+        Assert.assertNull(service.getBackendOrComputeNode(/* Not Exist */ 100));
+
+        List<ComputeNode> nodes = service.backendAndComputeNodeStream().collect(Collectors.toList());
+        Assert.assertEquals(2, nodes.size());
+        Assert.assertEquals(be, nodes.get(0));
+        Assert.assertEquals(cn, nodes.get(1));
+    }
+
+    @Test
     public void testDropBackend() throws Exception {
-        Config.integrate_starmgr = true;
-        Backend be = new Backend(10001, "newHost", 1000);
+        new MockUp<RunMode>() {
+            @Mock
+            public RunMode getCurrentRunMode() {
+                return RunMode.SHARED_DATA;
+            }
+        };
+
+        DataNode be = new DataNode(10001, "newHost", 1000);
         service.addBackend(be);
 
         new Expectations() {
@@ -139,16 +163,20 @@ public class SystemInfoServiceTest {
         service.addBackend(be);
         be.setStarletPort(1001);
         service.dropBackend("newHost", 1000, false);
-        Backend beIP = service.getBackendWithHeartbeatPort("newHost", 1000);
+        DataNode beIP = service.getBackendWithHeartbeatPort("newHost", 1000);
         Assert.assertTrue(beIP == null);
-
-        Config.integrate_starmgr = false;
     }
 
     @Test
     public void testReplayDropBackend() throws Exception {
-        Config.integrate_starmgr = true;
-        Backend be = new Backend(10001, "newHost", 1000);
+        new MockUp<RunMode>() {
+            @Mock
+            public RunMode getCurrentRunMode() {
+                return RunMode.SHARED_DATA;
+            }
+        };
+
+        DataNode be = new DataNode(10001, "newHost", 1000);
         be.setStarletPort(1001);
 
         new Expectations() {
@@ -165,10 +193,8 @@ public class SystemInfoServiceTest {
 
         service.addBackend(be);
         service.replayDropBackend(be);
-        Backend beIP = service.getBackendWithHeartbeatPort("newHost", 1000);
+        DataNode beIP = service.getBackendWithHeartbeatPort("newHost", 1000);
         Assert.assertTrue(beIP == null);
-
-        Config.integrate_starmgr = false;
     }
 
 
@@ -195,42 +221,42 @@ public class SystemInfoServiceTest {
 
         mockNet();
 
-        Backend be1 = new Backend(10001, "127.0.0.1", 1000);
+        DataNode be1 = new DataNode(10001, "127.0.0.1", 1000);
         be1.setBePort(1001);
         service.addBackend(be1);
-        Backend beIP1 = service.getBackendWithBePort("127.0.0.1", 1001);
+        DataNode beIP1 = service.getBackendWithBePort("127.0.0.1", 1001);
 
         service.dropAllBackend();
 
-        Backend be2 = new Backend(10001, "newHost-1", 1000);
+        DataNode be2 = new DataNode(10001, "newHost-1", 1000);
         be2.setBePort(1001);
         service.addBackend(be2);
-        Backend beFqdn = service.getBackendWithBePort("127.0.0.1", 1001);
+        DataNode beFqdn = service.getBackendWithBePort("127.0.0.1", 1001);
 
         Assert.assertTrue(beFqdn != null && beIP1 != null);
 
         service.dropAllBackend();
 
-        Backend be3 = new Backend(10001, "127.0.0.1", 1000);
+        DataNode be3 = new DataNode(10001, "127.0.0.1", 1000);
         be3.setBePort(1001);
         service.addBackend(be3);
-        Backend beIP3 = service.getBackendWithBePort("127.0.0.2", 1001);
+        DataNode beIP3 = service.getBackendWithBePort("127.0.0.2", 1001);
         Assert.assertTrue(beIP3 == null);
     }
 
     @Test
     public void testGetBackendOnlyWithHost() throws Exception {
 
-        Backend be = new Backend(10001, "newHost", 1000);
+        DataNode be = new DataNode(10001, "newHost", 1000);
         be.setBePort(1001);
         service.addBackend(be);
-        List<Backend> bes = service.getBackendOnlyWithHost("newHost");
+        List<DataNode> bes = service.getBackendOnlyWithHost("newHost");
         Assert.assertTrue(bes.size() == 1);
     }
 
     @Test
     public void testGetBackendIdWithStarletPort() throws Exception {
-        Backend be = new Backend(10001, "newHost", 1000);
+        DataNode be = new DataNode(10001, "newHost", 1000);
         be.setStarletPort(10001);
         service.addBackend(be);
         long backendId = service.getBackendIdWithStarletPort("newHost", 10001);

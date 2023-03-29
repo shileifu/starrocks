@@ -198,6 +198,7 @@ enum TTaskType {
     INSTALL_PLUGIN,
     UNINSTALL_PLUGIN,
     // this use for calculate enum count
+    DROP_AUTO_INCREMENT_MAP,
     NUM_TASK_TYPE
 }
 
@@ -299,6 +300,11 @@ struct TAggregateFunction {
   9: optional string remove_fn_symbol
   10: optional bool is_analytic_only_fn = false
   11: optional string symbol
+  // used for agg_func(a order by b, c) like array_agg, group_concat
+  12: optional list<bool> is_asc_order
+  // Indicates, for each expr, if nulls should be listed first or last. This is
+  // independent of is_asc_order.
+  13: optional list<bool> nulls_first
 }
 
 struct TTableFunction {
@@ -454,6 +460,10 @@ struct TUserIdentity {
     3: optional bool is_domain
 }
 
+struct TUserRoles {
+    1: optional list<i64> role_id_list
+}
+
 const i32 TSNAPSHOT_REQ_VERSION1 = 3; // corresponding to alpha rowset
 const i32 TSNAPSHOT_REQ_VERSION2 = 4; // corresponding to beta rowset
 // the snapshot request should always set prefer snapshot version to TPREFER_SNAPSHOT_REQ_VERSION
@@ -472,6 +482,7 @@ enum TCompressionType {
     DEFLATE = 9;
     BZIP2 = 10;
     LZO = 11; // Deprecated
+    BROTLI = 12;
 }
 
 enum TWriteQuorumType {

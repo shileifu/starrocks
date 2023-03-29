@@ -30,10 +30,7 @@
 #include "exprs/cast_expr.h"
 #include "exprs/literal.h"
 #include "formats/orc/fill_function.h"
-#include "formats/orc/orc_input_stream.h"
 #include "formats/orc/orc_mapping.h"
-#include "fs/fs.h"
-#include "gen_cpp/orc_proto.pb.h"
 #include "gutil/casts.h"
 #include "gutil/strings/substitute.h"
 #include "simd/simd.h"
@@ -134,8 +131,8 @@ Status OrcChunkReader::_slot_to_orc_column_name(const SlotDescriptor* desc,
                                                 const std::unordered_map<int, std::string>& column_id_to_orc_name,
                                                 std::string* orc_column_name) {
     auto col_name = format_column_name(desc->col_name(), _case_sensitive);
-    auto it = _name_to_column_id.find(col_name);
-    if (it == _name_to_column_id.end()) {
+    auto it = _formatted_slot_name_to_column_id.find(col_name);
+    if (it == _formatted_slot_name_to_column_id.end()) {
         auto s = strings::Substitute("OrcChunkReader::init_include_columns. col name = $0 not found, file = $1",
                                      desc->col_name(), _current_file_name);
         return Status::NotFound(s);
@@ -152,7 +149,8 @@ Status OrcChunkReader::_slot_to_orc_column_name(const SlotDescriptor* desc,
 
 Status OrcChunkReader::_init_include_columns(const std::unique_ptr<OrcMapping>& mapping) {
     // TODO(SmithCruise) delete _name_to_column_id, _hive_column_names when develop subfield lazy load.
-    build_column_name_to_id_mapping(&_name_to_column_id, _hive_column_names, _reader->getType(), _case_sensitive);
+    build_column_name_to_id_mapping(&_formatted_slot_name_to_column_id, _hive_column_names, _reader->getType(),
+                                    _case_sensitive);
 
     std::list<uint64_t> include_column_id;
 
@@ -261,8 +259,8 @@ Status OrcChunkReader::_init_position_in_orc() {
 
         if (slot_desc == nullptr) continue;
         std::string col_name = format_column_name(slot_desc->col_name(), _case_sensitive);
-        auto it = _name_to_column_id.find(col_name);
-        if (it == _name_to_column_id.end()) {
+        auto it = _formatted_slot_name_to_column_id.find(col_name);
+        if (it == _formatted_slot_name_to_column_id.end()) {
             auto s = strings::Substitute(
                     "OrcChunkReader::init_position_in_orc. failed to find position. col_name = $0, file = $1", col_name,
                     _current_file_name);
@@ -363,8 +361,8 @@ static Status _create_type_descriptor_by_orc(const TypeDescriptor& origin_type, 
         auto precision = (int)orc_type->getPrecision();
         auto scale = (int)orc_type->getScale();
         auto len = (int)orc_type->getMaximumLength();
-        auto iter = g_orc_starrocks_primitive_type_mapping.find(kind);
-        if (iter == g_orc_starrocks_primitive_type_mapping.end()) {
+        auto iter = g_orc_starrocks_logical_type_mapping.find(kind);
+        if (iter == g_orc_starrocks_logical_type_mapping.end()) {
             return Status::NotSupported("Unsupported ORC type: " + orc_type->toString());
         }
         result->type = iter->second;
@@ -395,8 +393,8 @@ static void _try_implicit_cast(TypeDescriptor* from, const TypeDescriptor& to) {
     } else if (is_integer_type(t1) && is_integer_type(t2)) {
         from->type = t2;
     } else if (is_decimal_type(t1) && is_decimal_type(t2)) {
-        // if target type is decimal v3 type, the from->type should be assigned to an correct
-        // primitive type according to the precision in original orc files so that the invariant
+        // if target type is decimal v3 type, the from->type should be assigned to a correct
+        // logical type according to the precision in original orc files so that the invariant
         // 0 <= scale <= precision <= decimal_precision_limit<RuntimeCppType<from_type>> is not
         // violated during creating a DecimalV3Column via ColumnHelper::create(...).
         if (t2 == LogicalType::TYPE_DECIMALV2) {
@@ -455,7 +453,7 @@ Status OrcChunkReader::_init_cast_exprs() {
         // For example, if we assume column A is an integer column, but it's stored as string in orc file
         // then min/max of A is almost unusable. Think that there are values ["10", "10000", "100001", "11"]
         // min/max will be "10" and "11", and we expect min/max is 10/100001
-        if (!_broker_load_mode && !starrocks_type.is_implicit_castable(orc_type)) {
+        if (!_broker_load_mode && !is_implicit_castable(starrocks_type, orc_type)) {
             return Status::NotSupported(strings::Substitute("Type mismatch: orc $0 to native $1. file = $2",
                                                             orc_type.debug_string(), starrocks_type.debug_string(),
                                                             _current_file_name));
@@ -664,12 +662,30 @@ StatusOr<ChunkPtr> OrcChunkReader::get_lazy_chunk() {
     return _cast_chunk(&ptr, _lazy_load_ctx->lazy_load_slots, &_lazy_load_ctx->lazy_load_indices);
 }
 
-void OrcChunkReader::lazy_read_next(size_t numValues) {
-    _row_reader->lazyLoadNext(*_batch, numValues);
+Status OrcChunkReader::lazy_read_next(size_t numValues) {
+    try {
+        // It may throw orc::ParseError exception
+        _row_reader->lazyLoadNext(*_batch, numValues);
+    } catch (std::exception& e) {
+        auto s = strings::Substitute("OrcChunkReader::lazy_read_next failed. reason = $0, file = $1", e.what(),
+                                     _current_file_name);
+        LOG(WARNING) << s;
+        return Status::InternalError(s);
+    }
+    return Status::OK();
 }
 
-void OrcChunkReader::lazy_seek_to(size_t rowInStripe) {
-    _row_reader->lazyLoadSeekTo(rowInStripe);
+Status OrcChunkReader::lazy_seek_to(size_t rowInStripe) {
+    try {
+        // It may throw orc::ParseError exception
+        _row_reader->lazyLoadSeekTo(rowInStripe);
+    } catch (std::exception& e) {
+        auto s = strings::Substitute("OrcChunkReader::lazy_seek_to failed. reason = $0, file = $1", e.what(),
+                                     _current_file_name);
+        LOG(WARNING) << s;
+        return Status::InternalError(s);
+    }
+    return Status::OK();
 }
 
 void OrcChunkReader::set_row_reader_filter(std::shared_ptr<orc::RowReaderFilter> filter) {
@@ -706,7 +722,7 @@ static std::unordered_set<TExprNodeType::type> _supported_expr_node_types = {
         TExprNodeType::type::LARGE_INT_LITERAL,
 };
 
-static std::unordered_map<LogicalType, orc::PredicateDataType> _supported_primitive_types = {
+static std::unordered_map<LogicalType, orc::PredicateDataType> _supported_logical_types = {
         {LogicalType::TYPE_BOOLEAN, orc::PredicateDataType::BOOLEAN},
         {LogicalType::TYPE_TINYINT, orc::PredicateDataType::LONG},
         {LogicalType::TYPE_SMALLINT, orc::PredicateDataType::LONG},
@@ -756,7 +772,7 @@ bool OrcChunkReader::_ok_to_add_conjunct(const Expr* conjunct) {
     }
 
     // supported one level. first child is slot, and others are literal values.
-    // and only support some of primitive types.
+    // and only support some of logical types.
     if (node_type == TExprNodeType::BINARY_PRED || node_type == TExprNodeType::IN_PRED ||
         node_type == TExprNodeType::IS_NULL_PRED) {
         // first child should be slot
@@ -790,8 +806,8 @@ bool OrcChunkReader::_ok_to_add_conjunct(const Expr* conjunct) {
         }
         for (int i = 0; i < conjunct->get_num_children(); i++) {
             Expr* expr = conjunct->get_child(i);
-            LogicalType pt = expr->type().type;
-            if (_supported_primitive_types.find(pt) == _supported_primitive_types.end()) {
+            LogicalType lt = expr->type().type;
+            if (_supported_logical_types.find(lt) == _supported_logical_types.end()) {
                 return false;
             }
         }
@@ -807,7 +823,7 @@ static inline orc::Int128 to_orc128(int128_t value) {
 
 static StatusOr<orc::Literal> translate_to_orc_literal(Expr* lit, orc::PredicateDataType pred_type) {
     TExprNodeType::type node_type = lit->node_type();
-    LogicalType ptype = lit->type().type;
+    LogicalType ltype = lit->type().type;
     if (node_type == TExprNodeType::type::NULL_LITERAL) {
         return {pred_type};
     }
@@ -819,7 +835,7 @@ static StatusOr<orc::Literal> translate_to_orc_literal(Expr* lit, orc::Predicate
     }
 
     const Datum& datum = ptr->get(0);
-    switch (ptype) {
+    switch (ltype) {
     case LogicalType::TYPE_BOOLEAN:
         return {bool(datum.get_int8())};
     case LogicalType::TYPE_TINYINT:
@@ -854,7 +870,7 @@ static StatusOr<orc::Literal> translate_to_orc_literal(Expr* lit, orc::Predicate
     case LogicalType::TYPE_DECIMAL128:
         return orc::Literal{to_orc128(datum.get_int128()), lit->type().precision, lit->type().scale};
     default:
-        CHECK(false) << "failed to handle primitive type = " << std::to_string(ptype);
+        CHECK(false) << "failed to handle logical type = " << std::to_string(ltype);
     }
 }
 
@@ -901,7 +917,7 @@ Status OrcChunkReader::_add_conjunct(const Expr* conjunct, std::unique_ptr<orc::
     auto* ref = down_cast<ColumnRef*>(slot);
     SlotId slot_id = ref->slot_id();
     std::string name = _slot_id_to_desc[slot_id]->col_name();
-    orc::PredicateDataType pred_type = _supported_primitive_types[slot->type().type];
+    orc::PredicateDataType pred_type = _supported_logical_types[slot->type().type];
 
     if (node_type == TExprNodeType::type::BINARY_PRED) {
         Expr* lit = conjunct->get_child(1);
@@ -1053,11 +1069,11 @@ Status OrcChunkReader::_add_conjunct(const Expr* conjunct, std::unique_ptr<orc::
 
 bool OrcChunkReader::_add_runtime_filter(const SlotDescriptor* slot, const JoinRuntimeFilter* rf,
                                          std::unique_ptr<orc::SearchArgumentBuilder>& builder) {
-    LogicalType ptype = slot->type().type;
-    auto type_it = _supported_primitive_types.find(ptype);
-    if (type_it == _supported_primitive_types.end()) return false;
+    LogicalType ltype = slot->type().type;
+    auto type_it = _supported_logical_types.find(ltype);
+    if (type_it == _supported_logical_types.end()) return false;
     orc::PredicateDataType pred_type = type_it->second;
-    switch (ptype) {
+    switch (ltype) {
         ADD_RF_BOOLEAN_TYPE(LogicalType::TYPE_BOOLEAN);
         ADD_RF_INT_TYPE(LogicalType::TYPE_TINYINT);
         ADD_RF_INT_TYPE(LogicalType::TYPE_SMALLINT);
@@ -1202,12 +1218,20 @@ void OrcChunkReader::report_error_message(const std::string& error_msg) {
     _state->append_error_msg_to_file("", error_msg);
 }
 
-int OrcChunkReader::get_column_id_by_name(const std::string& name) const {
-    const auto& it = _name_to_column_id.find(name);
-    if (it != _name_to_column_id.end()) {
+int OrcChunkReader::get_column_id_by_slot_name(const std::string& slot_name) const {
+    const std::string& formatted_slot_name = format_column_name(slot_name, _case_sensitive);
+    const auto& it = _formatted_slot_name_to_column_id.find(formatted_slot_name);
+    if (it != _formatted_slot_name_to_column_id.end()) {
         return it->second;
     }
     return -1;
+}
+
+bool OrcChunkReader::is_implicit_castable(TypeDescriptor& starrocks_type, const TypeDescriptor& orc_type) {
+    if (starrocks_type.is_decimal_type() && orc_type.is_decimal_type()) {
+        return true;
+    }
+    return false;
 }
 
 } // namespace starrocks

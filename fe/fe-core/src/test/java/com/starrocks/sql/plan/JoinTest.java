@@ -664,20 +664,18 @@ public class JoinTest extends PlanTestBase {
                 "limit \n" +
                 "  45;";
         String plan = getFragmentPlan(sql);
-        assertContains(plan, "9:Project\n" +
-                "  |  <slot 3> : 3: t1c\n" +
-                "  |  <slot 21> : 37\n" +
-                "  |  <slot 22> : 22: P_PARTKEY\n" +
-                "  |  <slot 23> : 23: P_NAME\n" +
-                "  |  <slot 24> : 24: P_MFGR\n" +
-                "  |  <slot 25> : 25: P_BRAND\n" +
-                "  |  <slot 26> : 26: P_TYPE\n" +
-                "  |  <slot 27> : 27: P_SIZE\n" +
-                "  |  <slot 28> : 28: P_CONTAINER\n" +
-                "  |  <slot 29> : 29: P_RETAILPRICE\n" +
-                "  |  <slot 30> : 30: P_COMMENT\n" +
-                "  |  <slot 31> : 31: PAD\n" +
-                "  |  <slot 40> : CAST(37 AS INT)");
+        assertContains(plan, "  8:Project\n" +
+                        "  |  <slot 3> : 3: t1c\n" +
+                        "  |  <slot 21> : 37\n" +
+                        "  |  <slot 32> : 32: S_SUPPKEY\n" +
+                        "  |  <slot 33> : 33: S_NAME\n" +
+                        "  |  <slot 34> : 34: S_ADDRESS\n" +
+                        "  |  <slot 35> : 35: S_NATIONKEY\n" +
+                        "  |  <slot 36> : 36: S_PHONE\n" +
+                        "  |  <slot 37> : 37: S_ACCTBAL\n" +
+                        "  |  <slot 38> : 38: S_COMMENT\n" +
+                        "  |  <slot 39> : 39: PAD\n" +
+                        "  |  <slot 40> : CAST(37 AS INT)\n");
     }
 
     @Test
@@ -2123,8 +2121,10 @@ public class JoinTest extends PlanTestBase {
                 "where 66 <= unix_timestamp() \n" +
                 "limit 155;";
         String plan = getFragmentPlan(sql);
-        assertContains(plan, "7:Project\n" +
-                "  |  <slot 10> : 1");
+        assertContains(plan, "  7:Project\n" +
+                "  |  <slot 7> : rand()\n" +
+                "  |  <slot 8> : round(rand())\n" +
+                "  |  limit: 126");
     }
 
     @Test
@@ -2692,5 +2692,60 @@ public class JoinTest extends PlanTestBase {
                 "  |  \n" +
                 "  0:OlapScanNode\n" +
                 "     TABLE: t0");
+    }
+
+    @Test
+    public void testShuffleAgg() throws Exception {
+        String sql = "select j0.* \n" +
+                "    from t6 j0 join[shuffle] t6 j1 on j0.v2 = j1.v2 and j0.v3 = j1.v3\n" +
+                "               join[shuffle] t6 j2 on j0.v2 = j2.v2 and j0.v3 = j2.v3 and j0.v4 = j2.v4\n" +
+                "               join[shuffle] (select v4,v2,v3 from t6 group by v4,v2,v3) j4 " +
+                "                             on j0.v2 =j4.v2 and j0.v3=j4.v3 and j0.v4 = j4.v4;\n" +
+                "\n";
+
+        connectContext.getSessionVariable().setNewPlanerAggStage(2);
+        String plan = getFragmentPlan(sql);
+        connectContext.getSessionVariable().setNewPlanerAggStage(0);
+
+        assertContains(plan, "  15:HASH JOIN\n" +
+                "  |  join op: INNER JOIN (BUCKET_SHUFFLE(S))\n" +
+                "  |  colocate: false, reason: \n" +
+                "  |  equal join conjunct: 2: v2 = 14: v2\n" +
+                "  |  equal join conjunct: 3: v3 = 15: v3\n" +
+                "  |  equal join conjunct: 4: v4 = 16: v4\n" +
+                "  |  \n" +
+                "  |----14:EXCHANGE\n" +
+                "  |    \n" +
+                "  9:Project");
+        assertContains(plan, "  PARTITION: HASH_PARTITIONED: 14: v2, 15: v3, 16: v4\n" +
+                "\n" +
+                "  STREAM DATA SINK\n" +
+                "    EXCHANGE ID: 14\n" +
+                "    HASH_PARTITIONED: 14: v2, 15: v3\n" +
+                "\n" +
+                "  13:AGGREGATE (merge finalize)\n" +
+                "  |  group by: 16: v4, 14: v2, 15: v3");
+    }
+
+    @Test // shouldn't have exception
+    public void testRemoveAggregationFromAggTableRuluWithJoinAssociateRule() throws Exception {
+        String sql = "select t0.v1 from t0 inner join (select a.k1, a.k2 from " +
+                "(select k1, k2, k3 from test_agg group by k1, k2, k3) as a " +
+                "where EXISTS (select a.k2 from " +
+                "(select k1, k2, k3 from test_agg group by k1, k2, k3) as a )) " +
+                "subv0 on t0.v1 = subv0.k1;";
+        getFragmentPlan(sql);
+    }
+
+    @Test
+    public void testTopNGroupMerge() throws Exception {
+        String sql = "with tmp1 as (select * from t0 order by v1 asc), tmp2 as (select v4 from t1 group by v4)" +
+                "select count(*) from t0, tmp2, tmp1, t1 " +
+                "where 1 in (select v4 from t1);";
+        String plan = getFragmentPlan(sql);
+        assertContains(plan, "21:NESTLOOP JOIN\n" +
+                "  |  join op: LEFT SEMI JOIN\n" +
+                "  |  colocate: false, reason: \n" +
+                "  |  other join predicates: 19: v4 = 1");
     }
 }

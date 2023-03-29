@@ -71,6 +71,12 @@ Status OlapScanNode::init(const TPlanNode& tnode, RuntimeState* state) {
         }
     }
 
+    if (_olap_scan_node.__isset.max_parallel_scan_instance_num && _olap_scan_node.max_parallel_scan_instance_num >= 1) {
+        // The parallel scan num will be restricted by the io_tasks_per_scan_operator.
+        _io_tasks_per_scan_operator =
+                std::min(_olap_scan_node.max_parallel_scan_instance_num, _io_tasks_per_scan_operator);
+    }
+
     _estimate_scan_and_output_row_bytes();
 
     return Status::OK();
@@ -465,7 +471,7 @@ Status OlapScanNode::_start_scan(RuntimeState* state) {
     cm.conjunct_ctxs_ptr = &_conjunct_ctxs;
     cm.tuple_desc = _tuple_desc;
     cm.obj_pool = _pool;
-    cm.key_column_names = &_olap_scan_node.key_column_name;
+    cm.key_column_names = &_olap_scan_node.sort_key_column_names;
     cm.runtime_filters = &_runtime_filter_collector;
     cm.runtime_state = state;
 
@@ -711,27 +717,6 @@ Status OlapScanNode::_capture_tablet_rowsets() {
     return Status::OK();
 }
 
-size_t _estimate_type_bytes(LogicalType ptype) {
-    switch (ptype) {
-    case TYPE_VARCHAR:
-    case TYPE_CHAR:
-    case TYPE_ARRAY:
-        return 128;
-    case TYPE_JSON:
-        // 1KB.
-        return 1024;
-    case TYPE_HLL:
-        // 16KB.
-        return 16 * 1024;
-    case TYPE_OBJECT:
-    case TYPE_PERCENTILE:
-        // 1MB.
-        return 1024 * 1024;
-    default:
-        return 0;
-    }
-}
-
 void OlapScanNode::_estimate_scan_and_output_row_bytes() {
     const TOlapScanNode& thrift_scan_node = thrift_olap_scan_node();
     const TupleDescriptor* tuple_desc = runtime_state()->desc_tbl().get_tuple_descriptor(thrift_scan_node.tuple_id);
@@ -744,7 +729,7 @@ void OlapScanNode::_estimate_scan_and_output_row_bytes() {
 
     for (const auto& slot : slots) {
         size_t field_bytes = std::max<size_t>(slot->slot_size(), 0);
-        field_bytes += _estimate_type_bytes(slot->type().type);
+        field_bytes += type_estimated_overhead_bytes(slot->type().type);
 
         _estimated_scan_row_bytes += field_bytes;
         if (unused_output_column_set.find(slot->col_name()) == unused_output_column_set.end()) {
@@ -754,10 +739,20 @@ void OlapScanNode::_estimate_scan_and_output_row_bytes() {
 }
 
 size_t OlapScanNode::_scanner_concurrency() const {
+    // The max scan parallel num for pipeline engine is io_tasks_per_scan_operator()
+    // But the max scan parallel num of non-pipeline engine is kMaxConcurrency.
+    // This functions is only used for non-pipeline engine,
+    // so use the min value of concurrency which is calculated and max_parallel_scan_instance_num.
+    // And the function will be removed later with non-pipeline engine
+
     int concurrency = estimated_max_concurrent_chunks();
     // limit concurrency not greater than scanner numbers
     concurrency = std::min<int>(concurrency, _num_scanners);
     concurrency = std::min<int>(concurrency, kMaxConcurrency);
+
+    if (_olap_scan_node.__isset.max_parallel_scan_instance_num && _olap_scan_node.max_parallel_scan_instance_num >= 1) {
+        concurrency = std::min(concurrency, _olap_scan_node.max_parallel_scan_instance_num);
+    }
 
     return concurrency;
 }
